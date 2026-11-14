@@ -2,7 +2,7 @@ node_modules/
 web/dist/
 .env
 # Your own questions, profile and session history: never committed.
-workspace/
+/workspace/
 *.tmp
 .DS_Store
 # Local tool output (screenshots, page snapshots, design critiques)

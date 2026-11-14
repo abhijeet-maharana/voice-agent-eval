@@ -387,7 +387,7 @@ function VoiceSelect({ label, value, onChange, opts, dflt = opts.defaultVoice }:
 }
 
 const MODES: { id: 'interview' | 'learn'; label: string; sub: string }[] = [
-  { id: 'interview', label: 'Interview', sub: 'A real call, no help' },
+  { id: 'interview', label: 'Evaluate', sub: 'A real call, no help' },
   { id: 'learn', label: 'Learn', sub: 'See the answer, ask doubts, explain it back' },
 ];
 
@@ -518,7 +518,7 @@ function Setup({ opts, micOk, onStart, onBrowse, onOpen, onDeleted }: { opts: Op
             </summary>
             <div className="form-grid">
               <label className="field">
-                <span className="field-label">{learn ? 'Tutor style' : 'Interviewer'}</span>
+                <span className="field-label">{learn ? 'Tutor style' : 'Evaluator'}</span>
                 <select className="input" value={persona} onChange={(e) => setPersona(e.target.value)}>
                   <option value="">Default for this round ({opts.personas.find((p) => p.id === r?.persona)?.label})</option>
                   {opts.personas.map((p) => (
@@ -835,7 +835,7 @@ function Transcript({ turns, coach, tall, empty, endRef }: { turns: Turn[]; coac
         turns.map((t, i) => (
           <div key={i} className={`turn ${t.who}`}>
             <span className="who">
-              {t.who === 'interviewer' ? (coach ? 'Coach' : 'Interviewer') : 'You'} · {mmss(t.start)}
+              {t.who === 'interviewer' ? (coach ? 'Coach' : 'Agent') : 'You'} · {mmss(t.start)}
             </span>
             <p>{t.text}</p>
           </div>
@@ -1121,7 +1121,7 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
       </section>
       {micQuiet && !muted && (
         <div className="nowbar warn" role="alert">
-          <Tag tone="warn">Mic silent</Tag> The page gets no sound from your microphone, so the {learn ? 'tutor' : 'interviewer'} can't hear you. Check the mic icon in the browser's address bar, your system's microphone permission for the browser, and that the input level moves when you talk.
+          <Tag tone="warn">Mic silent</Tag> The page gets no sound from your microphone, so the {learn ? 'tutor' : 'agent'} can't hear you. Check the mic icon in the browser's address bar, your system's microphone permission for the browser, and that the input level moves when you talk.
         </div>
       )}
       {learn && (
@@ -1152,11 +1152,11 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
             sub="live transcript"
             actions={
               <button type="button" className="linkish" aria-expanded={showWork} onClick={toggleWork}>
-                {showWork ? 'Hide' : 'Show'} what the {learn ? 'tutor' : 'interviewer'} is doing ({calls.length})
+                {showWork ? 'Hide' : 'Show'} what the {learn ? 'tutor' : 'agent'} is doing ({calls.length})
               </button>
             }
           >
-            <Transcript turns={turns} empty={`Waiting for the ${learn ? 'tutor' : 'interviewer'} to start…`} endRef={transcriptEnd} />
+            <Transcript turns={turns} empty={`Waiting for the ${learn ? 'tutor' : 'agent'} to start…`} endRef={transcriptEnd} />
           </Section>
           <Section title="Plan" sub={`${asked}/${plan.length} asked`}>
             <ol className="plan">

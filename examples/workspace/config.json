@@ -1,0 +1,72 @@
+{
+  "candidate": {
+    "name": "Sam",
+    "summary": "a senior backend engineer (Node.js, TypeScript, Postgres, AWS) taking part in a spoken architecture evaluation."
+  },
+  "language": "English",
+  "privateWords": ["internal-codename"],
+  "paths": {
+    "prep": "context"
+  },
+  "topicOrder": ["system-design", "api-tradeoffs", "incident-postmortem"],
+  "personas": {
+    "architect": {
+      "label": "Principal architect",
+      "text": "A principal engineer running a design review. Calm and precise. Asks for requirements and numbers before solutions, then pushes on data models, failure modes and the trade-off behind every choice."
+    },
+    "sre": {
+      "label": "Site reliability lead",
+      "text": "A site reliability lead running a blameless postmortem. Wants a clear timeline, the impact in numbers, what was done to stop the bleeding, the real root cause, and follow-up actions with owners."
+    }
+  },
+  "rounds": [
+    {
+      "id": "design-review",
+      "label": "System design review",
+      "about": "One system end to end: requirements, API, data model, scale, failure modes.",
+      "mix": { "system-design": 1 },
+      "minutes": 30,
+      "followUps": 5,
+      "persona": "architect",
+      "model": "fast",
+      "job": "optional",
+      "only": "design-",
+      "reviewFocus": "Weigh requirements, the data model, the scaling path and the trade-offs named more than delivery."
+    },
+    {
+      "id": "api-tradeoffs",
+      "label": "API trade-offs",
+      "about": "Protocol, pagination and retry safety decisions, with the reasons behind them.",
+      "mix": { "api-tradeoffs": 3 },
+      "minutes": 20,
+      "followUps": 2,
+      "persona": "architect",
+      "model": "fast",
+      "job": "optional"
+    },
+    {
+      "id": "postmortem",
+      "label": "Incident postmortem",
+      "about": "Walk through an outage: timeline, impact, mitigation, root cause, follow-ups.",
+      "mix": { "incident-postmortem": 2 },
+      "minutes": 20,
+      "followUps": 3,
+      "persona": "sre",
+      "model": "fast",
+      "job": "none",
+      "reviewFocus": "Judge the postmortem: a clear timeline, impact in numbers, mitigation kept apart from the fix, the real root cause, and follow-up actions with owners."
+    },
+    {
+      "id": "architecture",
+      "label": "Architecture evaluation",
+      "about": "A mixed round grounded in a system context pack: one design, two API decisions, one incident.",
+      "mix": { "system-design": 1, "api-tradeoffs": 2, "incident-postmortem": 1 },
+      "minutes": 35,
+      "followUps": 2,
+      "persona": "architect",
+      "model": "fast",
+      "job": "required",
+      "instructions": "Tie questions to the system in the context pack whenever it fits."
+    }
+  ]
+}

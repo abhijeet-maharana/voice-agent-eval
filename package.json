@@ -1,7 +1,7 @@
 {
-  "name": "voice-interviewer",
+  "name": "voice-agent-eval",
   "version": "0.1.0",
-  "description": "Live AI voice interviewer: Gemini Live asks, you answer out loud, Claude scores every answer. Bring your own questions.",
+  "description": "A real-time multimodal voice agent with live tool execution and an automated LLM evaluation grading engine.",
   "license": "MIT",
   "type": "module",
   "private": true,
@@ -40,5 +40,14 @@
     "react-dom": "^19.3.1",
     "typescript": "^7.0.2",
     "vite": "^8.3.8"
-  }
+  },
+  "keywords": [
+    "voice-agent",
+    "gemini-live",
+    "realtime",
+    "tool-calling",
+    "llm-evaluation",
+    "claude",
+    "speech"
+  ]
 }
