@@ -1,0 +1,7 @@
+node_modules/
+web/dist/
+.env
+# Your own questions, profile and session history: never committed.
+workspace/
+*.tmp
+.DS_Store
