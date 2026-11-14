@@ -114,6 +114,7 @@ interface ConfigFile {
   personas: Record<string, Persona>;
   paths: PathSettings;
   skip: { folders?: string[]; files?: string };
+  topicOrder: string[];
   reviewNotes: string[];
   defaultMode: Mode;
 }
@@ -143,6 +144,8 @@ export interface Config {
   personas: Record<string, Persona>;
   /** Question folders to skip (besides `_`/`.` folders), and a regular expression for file names to skip. */
   skip: { folders: string[]; files: RegExp | null };
+  /** Question folders in the order the question bank and the topic lists show them; the rest follow by name. */
+  topicOrder: string[];
   /** Extra rules for the reviewer (Claude), e.g. facts it must not use in rewrites. */
   reviewNotes: string[];
   /** The mode the start form picks first: `interview` (default) or `learn` (the tutor teaches each answer first). */
@@ -251,6 +254,7 @@ export function loadConfig(): Config {
     rounds,
     personas,
     skip: { folders: strings(raw.skip?.folders), files },
+    topicOrder: strings(raw.topicOrder),
     reviewNotes: strings(raw.reviewNotes),
     defaultMode: raw.defaultMode === 'learn' ? 'learn' : 'interview',
   };

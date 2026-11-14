@@ -555,3 +555,31 @@ test('restart: a grading flag left by a restart becomes an error the page can re
   assert.match(after.reviewError!, /interrupted/);
   assert.equal(after.status, 'ended', 'still gradable');
 });
+
+test('priority: must-know questions come first in the bank and in fresh picks; topicOrder orders folders', () => {
+  const qp = (title: string, p: number | null) => `# ${title}\n\n${p ? `**Priority:** ${p} (note)\n\n` : ''}## Short Answer\nx\n`;
+  write('questions/react/010-advanced.md', qp('Advanced react', 3));
+  write('questions/react/020-common.md', qp('Common react', null));
+  write('questions/react/030-must.md', qp('Must react', 1));
+  write('questions/react/040-must-too.md', qp('Must react too', 1));
+  const before = fs.readFileSync(path.join(root, 'config.json'), 'utf8');
+  write('config.json', JSON.stringify({ ...JSON.parse(before), topicOrder: ['react', 'nodejs'] }));
+  try {
+    const all = bank.loadBank();
+    const react = all.filter((q) => q.folder === 'react');
+    assert.deepEqual(react.map((q) => q.priority), [1, 1, 2, 3], 'parsed, default 2, sorted');
+    const noShort = bank.parseQuestion('x', '010-a.md', '# Tell me about yourself\n\n**Priority:** 1 (must know)\n\n> I build web apps.\n');
+    assert.equal(noShort!.short, '> I build web apps.', 'the priority line is never taken as the answer');
+    assert.deepEqual(bank.topicFolders(all).slice(0, 2), ['react', 'nodejs'], 'topicOrder first, the rest after');
+    const round = { ...cfg.loadConfig().rounds.find((r) => r.id === 'tech')!, mix: { react: 2 } };
+    for (const r of [0, 0.5, 0.99]) {
+      const ids = bank.pickQuestions(round, all, {}, { now: NOW, rand: () => r }).map((x) => x.id);
+      assert.deepEqual([...ids].sort(), ['react/030-must', 'react/040-must-too'], 'both must-know before anything else');
+    }
+    const progress = { 'react/030-must': { asked: 1, scores: [9], lastAsked: '2026-11-09', nextDue: '2026-12-01', failStreak: 0 } };
+    const next = bank.pickQuestions(round, all, progress, { now: NOW, rand: () => 0.5 }).map((x) => x.id);
+    assert.deepEqual(next, ['react/040-must-too', 'react/020-common'], 'an answered one waits; common comes before advanced');
+  } finally {
+    write('config.json', before);
+  }
+});

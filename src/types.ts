@@ -57,6 +57,11 @@ export interface BankQuestion {
   question: string;
   /** The file's "Short Answer" section (or its first paragraph): what a strong answer covers. */
   short: string;
+  /**
+   * From a `**Priority:** 1` line in the file: 1 must know, 2 common (the default), 3 advanced. Rounds ask
+   * never-asked questions in this order, and the question bank lists them in it.
+   */
+  priority?: number;
 }
 
 export interface ProgressEntry {

@@ -5,3 +5,6 @@ web/dist/
 workspace/
 *.tmp
 .DS_Store
+# Local tool output (screenshots, page snapshots, design critiques)
+.playwright-mcp/
+.impeccable/

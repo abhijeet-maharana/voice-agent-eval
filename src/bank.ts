@@ -28,11 +28,14 @@ function section(text: string, heading: RegExp): string {
   return out.join('\n').trim();
 }
 
+/** A `**Priority:** 1 (must know)` line: metadata for ordering, never part of the answer. */
+const PRIORITY_LINE = /^\*{0,2}Priority:?\*{0,2}:?\s*([1-3])\b.*$/im;
+
 export function parseQuestion(folder: string, file: string, text: string): BankQuestion | null {
   const title = text.match(/^# (.+)$/m)?.[1]?.trim();
   if (!title) return null;
   let short = section(text, /^##+ .*short answer/i);
-  if (!short) short = text.split('\n\n').find((p) => p.trim() && !p.trimStart().startsWith('#'))?.trim() ?? '';
+  if (!short) short = text.replace(PRIORITY_LINE, '').split('\n\n').find((p) => p.trim() && !p.trimStart().startsWith('#'))?.trim() ?? '';
   const question = title
     .replace(/\*\*/g, '')
     .replace(/^(Question|Q)\s*\d*\s*[:.]\s*/i, '')
@@ -40,22 +43,39 @@ export function parseQuestion(folder: string, file: string, text: string): BankQ
     // Notes for the reader, not words for the interviewer: "Tell me about yourself (the 75 second pitch)".
     .replace(/\s*\([^)]*\)\s*$/, '')
     .trim();
-  return { id: `${folder}/${file.replace(/\.md$/, '')}`, folder, question, short: short.slice(0, 1500) };
+  const priority = Number(text.match(PRIORITY_LINE)?.[1] ?? DEFAULT_PRIORITY);
+  return { id: `${folder}/${file.replace(/\.md$/, '')}`, folder, question, short: short.slice(0, 1500), priority };
 }
+
+/** 1 must know, 2 common, 3 advanced. Files without a `**Priority:**` line count as common. */
+export const DEFAULT_PRIORITY = 2;
+const prio = (q: BankQuestion) => q.priority ?? DEFAULT_PRIORITY;
 
 const isNote = (name: string) => /^[_.]/.test(name) || /^readme/i.test(name);
 
+/** "2-aws" before "10-css": numbers in names sort as numbers. */
+const natural = (a: string, b: string) => a.localeCompare(b, 'en', { numeric: true });
+
+/** Folders in `topicOrder` first (in that order), then the rest in natural order. */
+function orderFolders(folders: string[], topicOrder: string[]): string[] {
+  const rank = (f: string) => (topicOrder.includes(f) ? topicOrder.indexOf(f) : topicOrder.length);
+  return [...folders].sort((a, b) => rank(a) - rank(b) || natural(a, b));
+}
+
+/** Every question, folders in topic order, and inside a folder must-know first, then by file name. */
 export function loadBank(): BankQuestion[] {
   const dir = paths.questions();
-  const { skip } = loadConfig();
+  const { skip, topicOrder } = loadConfig();
   const out: BankQuestion[] = [];
-  for (const folder of fs.existsSync(dir) ? fs.readdirSync(dir).sort() : []) {
+  for (const folder of orderFolders(fs.existsSync(dir) ? fs.readdirSync(dir) : [], topicOrder)) {
     if (isNote(folder) || skip.folders.includes(folder) || !/^[\w.-]+$/.test(folder) || !fs.statSync(path.join(dir, folder)).isDirectory()) continue;
-    for (const file of fs.readdirSync(path.join(dir, folder)).sort()) {
+    const inFolder: BankQuestion[] = [];
+    for (const file of fs.readdirSync(path.join(dir, folder)).sort(natural)) {
       if (!file.endsWith('.md') || isNote(file) || skip.files?.test(file) || !/^[\w.-]+$/.test(file)) continue;
       const q = parseQuestion(folder, file, fs.readFileSync(path.join(dir, folder, file), 'utf8'));
-      if (q) out.push(q);
+      if (q) inFolder.push(q);
     }
+    out.push(...inFolder.sort((a, b) => prio(a) - prio(b)));
   }
   return out;
 }
@@ -104,9 +124,16 @@ function shuffle<T>(items: T[], rand: () => number): T[] {
   return a;
 }
 
+/** Must-know first; inside one priority, a random order so rounds don't repeat the same few. */
+function byPriority(items: BankQuestion[], rand: () => number): BankQuestion[] {
+  const levels = [...new Set(items.map(prio))].sort((a, b) => a - b);
+  return levels.flatMap((level) => shuffle(items.filter((q) => prio(q) === level), rand));
+}
+
 /**
  * Main questions for a round: per folder, questions due for repeat first (oldest due first), then never
- * asked, then the ones asked longest ago. `topic` narrows a round with `topicPick` to one folder.
+ * asked (must-know first), then the ones asked longest ago. `topic` narrows a round with `topicPick` to
+ * one folder.
  */
 export function pickQuestions(round: Round, bank: BankQuestion[], progress: Progress, opts: { topic?: string; now?: Date; rand?: () => number } = {}): BankQuestion[] {
   const today = dayKey(opts.now ?? new Date());
@@ -118,7 +145,7 @@ export function pickQuestions(round: Round, bank: BankQuestion[], progress: Prog
   for (const [folder, count] of Object.entries(mix)) {
     const pool = bank.filter((q) => q.folder === folder && (!only || only.test(q.id)));
     const due = pool.filter((q) => progress[q.id] && progress[q.id].nextDue <= today).sort((a, b) => progress[a.id].nextDue.localeCompare(progress[b.id].nextDue));
-    const fresh = shuffle(pool.filter((q) => !progress[q.id]), rand);
+    const fresh = byPriority(pool.filter((q) => !progress[q.id]), rand);
     const rest = pool.filter((q) => progress[q.id] && progress[q.id].nextDue > today).sort((a, b) => progress[a.id].lastAsked.localeCompare(progress[b.id].lastAsked));
     picked.push(...[...due, ...fresh, ...rest].slice(0, count));
   }

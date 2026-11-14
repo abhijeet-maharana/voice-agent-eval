@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { CLOSER, MAX_ADDED, bankEntry, dayKey, loadBank, nextDue, pickQuestions, questionFile, readProgress, relatedQuestion, topicFolders, words } from './bank';
+import { CLOSER, DEFAULT_PRIORITY, MAX_ADDED, bankEntry, dayKey, loadBank, nextDue, pickQuestions, questionFile, readProgress, relatedQuestion, topicFolders, words } from './bank';
 import { DEBRIEF_TOOLS, LEARN_TOOLS, TOOLS, VOICES, debriefInstruction, learnInstruction, liveConfig, liveModels, liveSetup, mintToken, pickTurnTaking, pickVoice, systemInstruction } from './interviewer';
 import type { BankQuestion, LiveModelId, Metrics, Mode, Progress, Review, ReviewAnswer, Round, Session, ToolCall, TranscriptTurn } from './types';
 import { HttpError, listPrepPacks, loadConfig, paths, profileTexts, readJson, readPrepPack, requireWorkspace, scrub, writeJson, writeText } from './workspace';
@@ -610,6 +610,7 @@ export function questionList(now = new Date()) {
       folder: q.folder,
       question: scrub(q.question, config),
       short: scrub(q.short, config),
+      priority: q.priority ?? DEFAULT_PRIORITY,
       asked: p?.asked ?? 0,
       lastScore: p?.scores.at(-1) ?? null,
       lastAsked: p?.lastAsked ?? null,

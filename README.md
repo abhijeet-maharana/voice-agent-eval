@@ -80,6 +80,8 @@ You can edit both notes files by hand.
 ```markdown
 # Explain the Node.js event loop.
 
+**Priority:** 1
+
 ## Short Answer
 One thread runs JavaScript. The loop goes through phases: timers, poll, check.
 Microtasks run between callbacks. Blocking the thread blocks every request.
@@ -91,6 +93,7 @@ What a senior answer adds: a production example, how you found it, how you fixed
 - The `# Title` is what the interviewer asks.
 - The **Short Answer** is all the live interviewer sees. It uses it to judge your answer and choose follow ups, and never reads it out.
 - Claude reads the whole file when it grades.
+- `**Priority:**` is optional: `1` must know, `2` common (the default), `3` advanced. The question bank lists must-know questions first (tagged, with a "Must know" filter), and rounds ask never-asked questions in priority order, random inside one level. Questions due for a repeat still come first.
 - Files and folders that start with `_`, and READMEs, are skipped. A file named `...tell-me-about-yourself...` opens a round, `...questions-to-ask...` closes it, and the system design round only uses files with `design-` in the name.
 
 ### Private words
@@ -200,6 +203,7 @@ Already keep interview notes somewhere else? Point the workspace at them instead
 | `paths` | Move any part: `questions`, `profile` (a folder or a list of files), `prep`, `sessions`, `reports`, `progress`, `coachNotes`, `interviewerNotes` |
 | `skip.folders` | Question folders that are not spoken questions (code exercises, notes) |
 | `skip.files` | A regular expression for question file names to skip |
+| `topicOrder` | Question folders in the order to list them, most important first, e.g. `["screening", "behavioral", "react"]`. Folders not named follow by name, with numbers sorted as numbers |
 | `reviewNotes` | Extra rules for the reviewer, added to Claude's prompt |
 
 ## Grading

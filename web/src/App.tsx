@@ -1,5 +1,6 @@
 import { Component, useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
 import { ApiError, beacon, del, get, post } from './api';
+import { Md } from './md';
 import { LiveInterview, type FunctionCall, type LiveState, type Turn as TurnState } from './live';
 import { Btn, Card, ConfirmButton, Empty, Section, SpeakerIcon, Stat, Tag, mmss, scoreTone, when } from './ui';
 
@@ -249,38 +250,6 @@ const remember = (key: string, value: string) => {
 
 const STATE_LABEL: Record<LiveState, string> = { connecting: 'Connecting', listening: 'Listening', speaking: 'Interviewer speaking', reconnecting: 'Reconnecting', closed: 'Ended' };
 const folderLabel = (f: string) => f.replace(/^\d+-/, '').replace(/-/g, ' ');
-
-/**
- * Just enough markdown for question notes: headings, bullets, numbered lines, code blocks, **bold** and
- * `code`. Everything is rendered as text nodes (no HTML from the file reaches the page).
- */
-function inline(text: string, key: string): ReactNode[] {
-  return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/).map((part, i) =>
-    part.startsWith('**') && part.endsWith('**') && part.length > 4 ? (
-      <b key={`${key}-${i}`}>{part.slice(2, -2)}</b>
-    ) : part.startsWith('`') && part.endsWith('`') && part.length > 2 ? (
-      <code key={`${key}-${i}`}>{part.slice(1, -1)}</code>
-    ) : (
-      part
-    ),
-  );
-}
-
-function Md({ text }: { text: string }) {
-  const out: ReactNode[] = [];
-  const lines = text.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.startsWith('```')) {
-      const code: string[] = [];
-      while (++i < lines.length && !lines[i].startsWith('```')) code.push(lines[i]);
-      out.push(<pre key={i} className="md-code">{code.join('\n')}</pre>);
-    } else if (/^#{1,6} /.test(line)) out.push(<h4 key={i}>{inline(line.replace(/^#+ /, ''), String(i))}</h4>);
-    else if (/^\s*([-*]|\d+\.) /.test(line)) out.push(<div key={i} className="md-li">{inline(line.trim(), String(i))}</div>);
-    else if (line.trim()) out.push(<p key={i}>{inline(line, String(i))}</p>);
-  }
-  return <div className="md">{out}</div>;
-}
 
 /** Handed from the Start click to the live view: audio is set up inside the click (browsers allow it only then). */
 let pendingLive: { li: LiveInterview; started: StartResult } | null = null;
@@ -652,6 +621,8 @@ interface BankItem {
   folder: string;
   question: string;
   short: string;
+  /** 1 must know, 2 common, 3 advanced. */
+  priority: number;
   asked: number;
   lastScore: number | null;
   lastAsked: string | null;
@@ -660,6 +631,7 @@ interface BankItem {
 
 const BANK_FILTERS: { id: string; label: string; test: (q: BankItem) => boolean }[] = [
   { id: 'all', label: 'All', test: () => true },
+  { id: 'must', label: 'Must know', test: (q) => q.priority === 1 },
   { id: 'new', label: 'Never asked', test: (q) => !q.asked },
   { id: 'due', label: 'Due for repeat', test: (q) => q.due },
   { id: 'weak', label: 'Last score under 6', test: (q) => q.lastScore !== null && q.lastScore < 6 },
@@ -773,6 +745,8 @@ function QuestionBank({ opts, micOk, onStart, onBack }: { opts: Options; micOk: 
                             {q.question}
                           </button>
                           <div className="bank-meta">
+                            {q.priority === 1 && <Tag tone="ok">must know</Tag>}
+                            {q.priority === 3 && <Tag tone="dim">advanced</Tag>}
                             {!q.asked ? <Tag tone="dim">new</Tag> : q.lastScore !== null ? <Tag tone={scoreTone(q.lastScore)}>last {q.lastScore}/10</Tag> : <Tag tone="dim">asked {q.asked}×</Tag>}
                             {q.due && <Tag tone="warn">due</Tag>}
                             {q.lastAsked && <span className="dim">asked {when(q.lastAsked)}</span>}
