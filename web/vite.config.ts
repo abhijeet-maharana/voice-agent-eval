@@ -6,6 +6,8 @@ import { defineConfig } from 'vite';
 // reload on http://localhost:5173 and sends /api to the server (npm run dev, port 4747 by default).
 export default defineConfig({
   root: fileURLToPath(new URL('.', import.meta.url)),
+  // Relative asset URLs, so the built page works under any path prefix (e.g. /app/remote-job/interview/).
+  base: './',
   plugins: [react()],
   build: { outDir: 'dist', emptyOutDir: true },
   server: {

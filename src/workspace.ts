@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Persona, Round } from './types';
+import type { Mode, Persona, Round } from './types';
 
 /**
  * The workspace: your own interview material and everything the app writes. Nothing in it is committed
@@ -29,16 +29,55 @@ export class HttpError extends Error {
 
 export const workspaceDir = () => path.resolve(process.env.WORKSPACE || 'workspace');
 
+/**
+ * Where each part lives. Every path can be moved with `paths` in config.json (relative to the workspace),
+ * so an existing folder of notes can be used as it is, e.g. `"questions": "../qna"`.
+ */
+export interface PathSettings {
+  questions?: string;
+  /** A folder of .md files, or a list of files. */
+  profile?: string | string[];
+  prep?: string;
+  sessions?: string;
+  reports?: string;
+  progress?: string;
+  coachNotes?: string;
+  interviewerNotes?: string;
+}
+
+const configFile = () => path.join(workspaceDir(), 'config.json');
+
+/** config.json as written (no defaults), read on every call: it is small, and edits apply without a restart. */
+function rawConfig(): Partial<ConfigFile> {
+  return readJson<Partial<ConfigFile>>(configFile(), {});
+}
+
+function setting(key: keyof PathSettings, fallback: string): string {
+  const v = rawConfig().paths?.[key];
+  return path.resolve(workspaceDir(), typeof v === 'string' && v.trim() ? v : fallback);
+}
+
 export const paths = {
-  config: () => path.join(workspaceDir(), 'config.json'),
-  questions: () => path.join(workspaceDir(), 'questions'),
-  profile: () => path.join(workspaceDir(), 'profile'),
-  prep: () => path.join(workspaceDir(), 'prep'),
-  sessions: () => path.join(workspaceDir(), 'sessions'),
-  reports: () => path.join(workspaceDir(), 'reports'),
-  progress: () => path.join(workspaceDir(), 'progress.json'),
-  coachNotes: () => path.join(workspaceDir(), 'coach-notes.md'),
-  interviewerNotes: () => path.join(workspaceDir(), 'interviewer-notes.md'),
+  config: configFile,
+  questions: () => setting('questions', 'questions'),
+  prep: () => setting('prep', 'prep'),
+  sessions: () => setting('sessions', 'sessions'),
+  reports: () => setting('reports', 'reports'),
+  progress: () => setting('progress', 'progress.json'),
+  coachNotes: () => setting('coachNotes', 'coach-notes.md'),
+  interviewerNotes: () => setting('interviewerNotes', 'interviewer-notes.md'),
+  /** The profile files: every .md in the profile folder, or the listed files. */
+  profileFiles: (): string[] => {
+    const v = rawConfig().paths?.profile;
+    if (Array.isArray(v)) return v.filter((f) => typeof f === 'string').map((f) => path.resolve(workspaceDir(), f));
+    const dir = path.resolve(workspaceDir(), typeof v === 'string' && v.trim() ? v : 'profile');
+    if (!fs.existsSync(dir)) return [];
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.md'))
+      .sort()
+      .map((f) => path.join(dir, f));
+  },
 };
 
 export function readJson<T>(file: string, fallback: T): T {
@@ -64,6 +103,19 @@ export function writeText(file: string, text: string): void {
 
 // ---------- Config ----------
 
+/** What config.json may hold (every field optional). */
+interface ConfigFile {
+  candidate: { name?: string; summary?: string };
+  language: string;
+  privateWords: string[];
+  rounds: Round[];
+  personas: Record<string, Persona>;
+  paths: PathSettings;
+  skip: { folders?: string[]; files?: string };
+  reviewNotes: string[];
+  defaultMode: Mode;
+}
+
 export interface Config {
   candidate: {
     /** Optional. The interviewer and the reviewer use it; leave it out to stay "the candidate". */
@@ -80,6 +132,12 @@ export interface Config {
   privateWords: string[];
   rounds: Round[];
   personas: Record<string, Persona>;
+  /** Question folders to skip (besides `_`/`.` folders), and a regular expression for file names to skip. */
+  skip: { folders: string[]; files: RegExp | null };
+  /** Extra rules for the reviewer (Claude), e.g. facts it must not use in rewrites. */
+  reviewNotes: string[];
+  /** The mode the start form picks first: `interview` (default) or `learn` (the tutor teaches each answer first). */
+  defaultMode: Mode;
 }
 
 export const DEFAULT_PERSONAS: Record<string, Persona> = {
@@ -113,6 +171,19 @@ export const DEFAULT_ROUNDS: Round[] = [
   { id: 'system-design', label: 'System design (spoken)', about: 'One design end to end: requirements, API, data, scale, trade-offs.', mix: { 'system-design': 1 }, minutes: 35, followUps: 6, persona: 'bigtech', model: 'thinking', job: 'none', only: 'design-' },
   { id: 'ai', label: 'AI engineering', about: 'AI tools at work, RAG, agents, evals.', mix: { ai: 4 }, minutes: 20, followUps: 2, persona: 'cto', model: 'fast', job: 'optional' },
   { id: 'real', label: 'Real interview', about: 'Built from a prep pack: the company, the role and its stack.', mix: { screening: 1, behavioral: 2, nodejs: 1, react: 1, 'system-design': 1 }, minutes: 30, followUps: 2, persona: 'cto', model: 'fast', job: 'required' },
+  {
+    id: 'communication',
+    label: 'Communication practice',
+    about: 'Clear spoken answers: headline first, short sentences, a real example, a clean ending.',
+    mix: { screening: 2, behavioral: 2 },
+    minutes: 15,
+    followUps: 1,
+    persona: 'manager',
+    model: 'fast',
+    job: 'none',
+    instructions: 'If an answer rambles or has no example, use your one follow up to ask for the short version or a concrete example.',
+    reviewFocus: 'This is a communication round: weigh structure and delivery (headline first, short sentences, no filler, a concrete example, a clean ending) more than technical depth.',
+  },
   { id: 'ai-screen', label: 'AI video screen', about: 'Like the one-way video screens: fixed questions, no follow ups, about 2 minutes each.', mix: { screening: 2, behavioral: 2, nodejs: 1, react: 1 }, minutes: 20, followUps: 0, persona: 'aiscreen', model: 'fast', job: 'optional' },
 ];
 
@@ -125,6 +196,8 @@ function checkRound(r: Round, personas: Record<string, Persona>): string | null 
   if (!personas[r.persona]) return `round ${r.id}: unknown persona "${r.persona}"`;
   if (r.model !== 'fast' && r.model !== 'thinking') return `round ${r.id}: model must be "fast" or "thinking"`;
   if (!['required', 'optional', 'none'].includes(r.job)) return `round ${r.id}: job must be required, optional or none`;
+  if ((r.instructions !== undefined && typeof r.instructions !== 'string') || (r.reviewFocus !== undefined && typeof r.reviewFocus !== 'string'))
+    return `round ${r.id}: instructions and reviewFocus must be text`;
   if (r.only) {
     try {
       new RegExp(r.only);
@@ -137,22 +210,34 @@ function checkRound(r: Round, personas: Record<string, Persona>): string | null 
 
 /** Reads workspace/config.json on every call (it is small), so edits apply without a restart. */
 export function loadConfig(): Config {
-  const raw = readJson<Partial<Config>>(paths.config(), {});
+  const raw = rawConfig();
   const personas = { ...DEFAULT_PERSONAS, ...(raw.personas ?? {}) };
   const rounds = Array.isArray(raw.rounds) && raw.rounds.length ? raw.rounds : DEFAULT_ROUNDS;
   for (const r of rounds) {
     const problem = checkRound(r, personas);
     if (problem) throw new HttpError(500, `workspace/config.json: ${problem}`);
   }
+  let files: RegExp | null = null;
+  if (typeof raw.skip?.files === 'string' && raw.skip.files) {
+    try {
+      files = new RegExp(raw.skip.files, 'i');
+    } catch {
+      throw new HttpError(500, 'workspace/config.json: skip.files is not a valid regular expression');
+    }
+  }
+  const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && !!x.trim()).map((x) => x.trim()) : []);
   return {
     candidate: {
       name: typeof raw.candidate?.name === 'string' && raw.candidate.name.trim() ? raw.candidate.name.trim() : undefined,
       summary: raw.candidate?.summary?.trim() || 'a software engineer practising for job interviews.',
     },
     language: raw.language?.trim() || 'English',
-    privateWords: Array.isArray(raw.privateWords) ? raw.privateWords.filter((w) => typeof w === 'string' && w.trim()).map((w) => w.trim().toLowerCase()) : [],
+    privateWords: strings(raw.privateWords).map((w) => w.toLowerCase()),
     rounds,
     personas,
+    skip: { folders: strings(raw.skip?.folders), files },
+    reviewNotes: strings(raw.reviewNotes),
+    defaultMode: raw.defaultMode === 'learn' ? 'learn' : 'interview',
   };
 }
 
@@ -175,16 +260,13 @@ export function requireWorkspace(): void {
 
 // ---------- Profile and prep packs ----------
 
-/** Every profile/*.md file, scrubbed. */
+/** Every profile file, scrubbed. */
 export function profileTexts(): { file: string; text: string }[] {
-  const dir = paths.profile();
-  if (!fs.existsSync(dir)) return [];
   const config = loadConfig();
-  return fs
-    .readdirSync(dir)
-    .filter((f) => f.endsWith('.md'))
-    .sort()
-    .map((file) => ({ file, text: scrub(fs.readFileSync(path.join(dir, file), 'utf8'), config) }));
+  return paths
+    .profileFiles()
+    .filter((f) => fs.existsSync(f))
+    .map((f) => ({ file: path.basename(f), text: scrub(fs.readFileSync(f, 'utf8'), config) }));
 }
 
 export function listPrepPacks(): { file: string; title: string }[] {

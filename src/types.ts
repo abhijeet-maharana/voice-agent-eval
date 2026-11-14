@@ -3,6 +3,21 @@
 /** `fast` answers in about a second, like a real call; `thinking` reasons before it speaks. */
 export type LiveModelId = 'fast' | 'thinking';
 
+/**
+ * `interview`: a realistic call, no help. `learn`: a tutor shows and teaches each answer first, takes your
+ * doubts, then asks you to explain it back, and only that explanation is scored.
+ */
+export type Mode = 'interview' | 'learn';
+
+/**
+ * How the voice knows you finished: `auto` replies after `pauseMs` of silence; `button` waits until you
+ * press Done (Gemini's automatic voice activity detection is off, the page marks your turn).
+ */
+export interface TurnTaking {
+  mode: 'auto' | 'button';
+  pauseMs: number;
+}
+
 export interface Round {
   /** Lowercase letters, digits and dashes: it ends up in session ids and file names. */
   id: string;
@@ -23,6 +38,10 @@ export interface Round {
   only?: string;
   /** The page lets you narrow the round to one question folder. */
   topicPick?: boolean;
+  /** Extra instructions for the interviewer in this round, e.g. "Focus on CSS layout and accessibility." */
+  instructions?: string;
+  /** What the reviewer should weigh most in this round, e.g. "Delivery and structure matter more than depth." */
+  reviewFocus?: string;
 }
 
 export interface Persona {
@@ -57,6 +76,8 @@ export interface ToolCall {
   result: unknown;
   ms: number;
   error?: string;
+  /** Seconds since the session started, on the page's clock (the same clock as the transcript). */
+  t?: number;
 }
 
 export interface TranscriptTurn {
@@ -107,13 +128,16 @@ export interface Session {
   persona: string;
   topic?: string;
   prepPack?: string;
+  /** Missing on older sessions: `interview`. */
+  mode?: Mode;
   modelChoice?: LiveModelId;
   /** The model name sent to Gemini. */
   model?: string;
   createdAt: string;
   status: 'live' | 'ended' | 'reviewed';
   /** `added`: picked live by related_question from something the candidate said (it replaced a planned question). */
-  plan: { id: string; question: string; asked: boolean; added?: boolean }[];
+  /** `recalled`: learn mode, the candidate started explaining it back (start_recall). */
+  plan: { id: string; question: string; asked: boolean; added?: boolean; recalled?: boolean }[];
   toolCalls: ToolCall[];
   notes: { question_id: string; rating: number; note: string; at: string }[];
   transcript: TranscriptTurn[];
@@ -132,4 +156,5 @@ export interface Session {
   debriefs?: { at: string; durationSeconds: number; voice?: string; transcript: TranscriptTurn[] }[];
   /** The interviewer's voice (a VOICES name). */
   voice?: string;
+  turnTaking?: TurnTaking;
 }

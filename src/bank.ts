@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BankQuestion, Progress, Round, Session } from './types';
-import { paths, readJson } from './workspace';
+import { loadConfig, paths, readJson } from './workspace';
 
 /**
  * The question bank (workspace/questions/<folder>/*.md) and spaced repetition (workspace/progress.json).
@@ -47,11 +47,12 @@ const isNote = (name: string) => /^[_.]/.test(name) || /^readme/i.test(name);
 
 export function loadBank(): BankQuestion[] {
   const dir = paths.questions();
+  const { skip } = loadConfig();
   const out: BankQuestion[] = [];
   for (const folder of fs.existsSync(dir) ? fs.readdirSync(dir).sort() : []) {
-    if (isNote(folder) || !/^[\w.-]+$/.test(folder) || !fs.statSync(path.join(dir, folder)).isDirectory()) continue;
+    if (isNote(folder) || skip.folders.includes(folder) || !/^[\w.-]+$/.test(folder) || !fs.statSync(path.join(dir, folder)).isDirectory()) continue;
     for (const file of fs.readdirSync(path.join(dir, folder)).sort()) {
-      if (!file.endsWith('.md') || isNote(file) || !/^[\w.-]+$/.test(file)) continue;
+      if (!file.endsWith('.md') || isNote(file) || skip.files?.test(file) || !/^[\w.-]+$/.test(file)) continue;
       const q = parseQuestion(folder, file, fs.readFileSync(path.join(dir, folder, file), 'utf8'));
       if (q) out.push(q);
     }

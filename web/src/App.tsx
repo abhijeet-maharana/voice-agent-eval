@@ -1,5 +1,5 @@
 import { Component, useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
-import { beacon, get, post } from './api';
+import { ApiError, beacon, get, post } from './api';
 import { LiveInterview, type FunctionCall, type LiveState } from './live';
 import { Btn, Card, Empty, Section, Stat, Tag, ago, mmss, scoreTone } from './ui';
 
@@ -44,6 +44,7 @@ interface Options {
   models: { id: string; label: string; model: string }[];
   voices: { id: string; style: string }[];
   defaultVoice: string;
+  defaultMode: 'interview' | 'learn';
   rounds: RoundInfo[];
   personas: { id: string; label: string }[];
   topics: string[];
@@ -81,6 +82,7 @@ interface Session {
   id: string;
   round: string;
   persona: string;
+  mode?: 'interview' | 'learn';
   model?: string;
   status: 'live' | 'ended' | 'reviewed';
   plan: { id: string; question: string; asked: boolean; added?: boolean }[];
@@ -115,7 +117,7 @@ interface ShownCall {
   error?: string;
 }
 
-type LiveStart = { wsUrl: string; token: string; setup: { setup: Record<string, unknown> } };
+type LiveStart = { wsUrl: string; token: string; setup: { setup: Record<string, unknown> }; kickoff?: string };
 type StartResult = { session: Session; live: LiveStart };
 
 /** Remembered per browser (a convenience only: storage can be blocked, so every access is guarded). */
@@ -137,6 +139,38 @@ const remember = (key: string, value: string) => {
 const STATE_LABEL: Record<LiveState, string> = { connecting: 'Connecting', listening: 'Listening', speaking: 'Interviewer speaking', reconnecting: 'Reconnecting', closed: 'Ended' };
 const folderLabel = (f: string) => f.replace(/^\d+-/, '').replace(/-/g, ' ');
 
+/**
+ * Just enough markdown for question notes: headings, bullets, numbered lines, code blocks, **bold** and
+ * `code`. Everything is rendered as text nodes (no HTML from the file reaches the page).
+ */
+function inline(text: string, key: string): ReactNode[] {
+  return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/).map((part, i) =>
+    part.startsWith('**') && part.endsWith('**') && part.length > 4 ? (
+      <b key={`${key}-${i}`}>{part.slice(2, -2)}</b>
+    ) : part.startsWith('`') && part.endsWith('`') && part.length > 2 ? (
+      <code key={`${key}-${i}`}>{part.slice(1, -1)}</code>
+    ) : (
+      part
+    ),
+  );
+}
+
+function Md({ text }: { text: string }) {
+  const out: ReactNode[] = [];
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith('```')) {
+      const code: string[] = [];
+      while (++i < lines.length && !lines[i].startsWith('```')) code.push(lines[i]);
+      out.push(<pre key={i} className="md-code">{code.join('\n')}</pre>);
+    } else if (/^#{1,6} /.test(line)) out.push(<h4 key={i}>{inline(line.replace(/^#+ /, ''), String(i))}</h4>);
+    else if (/^\s*([-*]|\d+\.) /.test(line)) out.push(<div key={i} className="md-li">{inline(line.trim(), String(i))}</div>);
+    else if (line.trim()) out.push(<p key={i}>{inline(line, String(i))}</p>);
+  }
+  return <div className="md">{out}</div>;
+}
+
 /** Handed from the Start click to the live view: audio is set up inside the click (browsers allow it only then). */
 let pendingLive: { li: LiveInterview; started: StartResult } | null = null;
 /** Handed from the Listen click to the debrief view. */
@@ -145,9 +179,10 @@ let pendingDebrief: { li: LiveInterview; live: LiveStart } | null = null;
 export default function App() {
   const [opts, setOpts] = useState<Options | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [unlock, setUnlock] = useState<string | null>(null);
   const [view, setView] = useState<{ kind: 'setup' } | { kind: 'live'; session: Session } | { kind: 'done'; id: string }>({ kind: 'setup' });
 
-  const load = () => get<Options>('/api/options').then(setOpts, (e) => setError(e.message));
+  const load = () => get<Options>('api/options').then(setOpts, (e) => setError(e.message));
   useEffect(() => {
     void load();
   }, []);
@@ -169,6 +204,7 @@ export default function App() {
           {error && (
             <div className="nowbar">
               <Tag tone="bad">Error</Tag> {error}
+              {unlock && <a href={unlock}>Sign in</a>}
             </div>
           )}
           {!opts.workspaceReady && (
@@ -195,12 +231,13 @@ export default function App() {
                 const li = new LiveInterview();
                 try {
                   await li.prepareAudio();
-                  const r = await post<StartResult>('/api/sessions', input);
+                  const r = await post<StartResult>('api/sessions', input);
                   pendingLive = { li, started: r };
                   setView({ kind: 'live', session: r.session });
                 } catch (e) {
                   li.stop();
                   setError((e as Error).message);
+                  setUnlock(e instanceof ApiError ? (e.unlock ?? null) : null);
                 }
               }}
               onOpen={(id) => setView({ kind: 'done', id })}
@@ -252,6 +289,7 @@ function Setup({ opts, canStart, onStart, onOpen }: { opts: Options; canStart: b
   const [topic, setTopic] = useState('');
   const [prepPack, setPrepPack] = useState('');
   const [model, setModel] = useState('');
+  const [mode, setMode] = useState<'interview' | 'learn'>(opts.defaultMode);
   const [voice, setVoiceState] = useState(() => remembered('vi.voice'));
   const setVoice = (v: string) => {
     setVoiceState(v);
@@ -264,6 +302,13 @@ function Setup({ opts, canStart, onStart, onOpen }: { opts: Options; canStart: b
       <Section title="Start a round" sub={`${opts.questionCount} questions in your bank · ${opts.dueCount ? `${opts.dueCount} due for repeat` : 'no repeats due'}`}>
         <Card>
           <div className="form-grid">
+            <label className="field">
+              <span className="field-label">Mode</span>
+              <select className="input" value={mode} onChange={(e) => setMode(e.target.value as 'interview' | 'learn')}>
+                <option value="interview">Interview: a real call, no help</option>
+                <option value="learn">Learn: see the answer, ask doubts, then explain it back</option>
+              </select>
+            </label>
             <label className="field">
               <span className="field-label">Round</span>
               <select className="input" value={round} onChange={(e) => setRound(e.target.value)}>
@@ -324,7 +369,11 @@ function Setup({ opts, canStart, onStart, onOpen }: { opts: Options; canStart: b
               </label>
             )}
             <p className="hint wide">
-              {r?.about} {r?.questions} main question{r?.questions === 1 ? '' : 's'}, {r?.followUps ? `up to ${r.followUps} follow ups each` : 'no follow ups'}. Headphones stop its voice leaking into your mic. Say “hint”, “repeat” or “skip” any time.
+              {r?.about} {r?.questions} {mode === 'learn' ? 'question' : 'main question'}{r?.questions === 1 ? '' : 's'}
+              {mode === 'learn'
+                ? '. For each one the tutor shows and teaches the answer, takes your doubts, then asks you to explain it back; only your explanation is scored. Say “explain again”, “example” or “next” any time.'
+                : `, ${r?.followUps ? `up to ${r.followUps} follow ups each` : 'no follow ups'}. Say “hint”, “repeat” or “skip” any time.`}{' '}
+              Headphones stop its voice leaking into your mic.
             </p>
           </div>
           <Btn
@@ -333,6 +382,7 @@ function Setup({ opts, canStart, onStart, onOpen }: { opts: Options; canStart: b
             onClick={() =>
               onStart({
                 round,
+                mode,
                 ...(persona ? { persona } : {}),
                 ...(model ? { model } : {}),
                 ...(voice && opts.voices.some((v) => v.id === voice) ? { voice } : {}),
@@ -400,6 +450,7 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
   const [turns, setTurns] = useState<Turn[]>([]);
   const [calls, setCalls] = useState<ShownCall[]>([]);
   const [plan, setPlan] = useState(session.plan);
+  const [lesson, setLesson] = useState<{ id: string; question: string; notes: string; hidden: boolean; peek: boolean } | null>(null);
   const [notes, setNotes] = useState<{ question_id: string; rating: number; note: string }[]>([]);
   const [showNotes, setShowNotes] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -425,7 +476,7 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
   const logRef = useRef<LogEntry[]>([]);
   const logSent = useRef(0);
   const now = () => (performance.now() - t0.current) / 1000;
-  const base = `/api/sessions/${session.id}`;
+  const base = `api/sessions/${session.id}`;
 
   const addLog = (event: string, detail?: string) => {
     logRef.current.push({ t: Math.round(now() * 10) / 10, event, ...(detail ? { detail } : {}) });
@@ -494,7 +545,7 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
           const key = `${fc.id}-${Date.now()}`;
           setCalls((c) => [...c, { key, name: fc.name, args: fc.args, at: now() }]);
           try {
-            const rec = await post<ToolCallRecord>(`${base}/tool`, { name: fc.name, args: fc.args });
+            const rec = await post<ToolCallRecord>(`${base}/tool`, { name: fc.name, args: fc.args, t: now() });
             setCalls((c) => c.map((x) => (x.key === key ? { ...x, result: rec.result, ms: rec.ms, error: rec.error } : x)));
             if (fc.name === 'next_question') {
               const qid = (rec.result as { question_id?: string })?.question_id;
@@ -504,6 +555,11 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
             if (fc.name === 'related_question' && (rec.result as { found?: boolean })?.found) void get<Session>(base).then((x) => setPlan(x.plan));
             if (fc.name === 'record_note' && !rec.error) setNotes((n) => [...n, fc.args as { question_id: string; rating: number; note: string }]);
             if (fc.name === 'end_interview') endAsked.current = true;
+            // Learn mode: the answer shows while the tutor teaches it, and hides when the explain-back starts.
+            const res = rec.result as { question?: string; question_id?: string; notes?: string; answer?: string } | undefined;
+            if (fc.name === 'next_question' && res?.question && (res.notes || res.answer))
+              setLesson({ id: res.question_id ?? '', question: res.question, notes: res.notes || res.answer || '', hidden: false, peek: false });
+            if (fc.name === 'start_recall' && !rec.error) setLesson((l) => (l ? { ...l, hidden: true, peek: false } : l));
             return { result: rec.result };
           } catch (e) {
             const message = (e as Error).message;
@@ -534,7 +590,7 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
       onClose: (reason?: string) => {
         if (reason) void finish(`connection lost: ${reason}`);
       },
-    }).catch((e) => {
+    }, started.live.kickoff).catch((e) => {
       onError(e);
       void finish(`could not start: ${(e as Error).message}`);
     });
@@ -588,10 +644,12 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
   }, [turns]);
 
   const asked = plan.filter((q) => q.asked).length;
+  const learn = session.mode === 'learn';
   return (
     <>
       <div className={`nowbar ${state === 'closed' ? '' : 'live'}`}>
-        <Tag tone={state === 'speaking' ? 'warn' : state === 'listening' ? 'ok' : 'dim'}>{STATE_LABEL[state]}</Tag>
+        <Tag tone={state === 'speaking' ? 'warn' : state === 'listening' ? 'ok' : 'dim'}>{learn && state === 'speaking' ? 'Tutor speaking' : STATE_LABEL[state]}</Tag>
+        {learn && <Tag>Learn mode</Tag>}
         <b>{mmss(elapsed)}</b>
         <span className="dim">
           Question {Math.max(asked, 1)} of {plan.length}
@@ -619,6 +677,27 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
           <Tag tone="warn">Mic silent</Tag> The page gets no sound from your microphone, so the interviewer can't hear you. Check the mic icon in the browser's address bar, your
           system's microphone permission for the browser, and that the input level moves when you talk.
         </div>
+      )}
+      {learn && (
+        <Section title="Study card" sub={lesson ? (lesson.hidden ? 'answer hidden: explain it back in your own words' : 'read along while the tutor teaches; ask any doubt') : 'the answer shows here with each question'}>
+          {lesson ? (
+            <Card tone={lesson.hidden ? 'warn' : 'accent'}>
+              <b className="lesson-q">{lesson.question}</b>
+              {lesson.hidden && !lesson.peek ? (
+                <p className="hint">
+                  Explain it back now, as you would in an interview.{' '}
+                  <button type="button" className="linkish" onClick={() => setLesson((l) => (l ? { ...l, peek: true } : l))}>
+                    Peek at the answer
+                  </button>
+                </p>
+              ) : (
+                <Md text={lesson.notes} />
+              )}
+            </Card>
+          ) : (
+            <Empty>Waiting for the first question…</Empty>
+          )}
+        </Section>
       )}
       <div className="live-grid">
         <Section title="Conversation" sub="live transcript">
@@ -678,7 +757,7 @@ function Debrief({ sessionId, voice, onDone }: { sessionId: string; voice: strin
   const finished = useRef(false);
   const end = useRef<HTMLDivElement>(null);
   const now = () => (performance.now() - t0.current) / 1000;
-  const url = `/api/sessions/${sessionId}/debrief/end`;
+  const url = `api/sessions/${sessionId}/debrief/end`;
 
   const finish = async () => {
     if (finished.current) return;
@@ -781,7 +860,7 @@ class LiveGuard extends Component<{ sessionId: string; children: ReactNode }, { 
     return { error };
   }
   componentDidCatch(error: Error) {
-    beacon(`/api/sessions/${this.props.sessionId}/log`, { entries: [{ t: 0, event: 'page crashed', detail: `${error.message} | ${String(error.stack ?? '').split('\n').slice(0, 4).join(' | ')}` }] });
+    beacon(`api/sessions/${this.props.sessionId}/log`, { entries: [{ t: 0, event: 'page crashed', detail: `${error.message} | ${String(error.stack ?? '').split('\n').slice(0, 4).join(' | ')}` }] });
   }
   render() {
     if (!this.state.error) return this.props.children;
@@ -835,13 +914,11 @@ function CallCard({ call, open, hideResult }: { call: ShownCall; open: boolean; 
 }
 
 function Pending({ s, opts, onRetry }: { s: Session; opts: Options; onRetry: () => Promise<void> }) {
-  const promptUrl = `/api/sessions/${s.id}/review-prompt`;
+  const promptUrl = `api/sessions/${s.id}/review-prompt`;
   const byHand = (
     <p className="hint">
       To grade by hand: open the <a href={promptUrl} target="_blank" rel="noopener">review prompt</a>, paste it into any Claude chat, save the JSON reply as <code>review.json</code>, then run{' '}
-      <code>
-        curl -X POST localhost:{window.location.port || 80}/api/sessions/{s.id}/review -H 'content-type: application/json' --data @review.json
-      </code>
+      <code>curl -X POST {new URL(`api/sessions/${s.id}/review`, window.location.href).href} -H 'content-type: application/json' --data @review.json</code>
       .
     </p>
   );
@@ -897,7 +974,7 @@ function Done({ id, opts, onBack }: { id: string; opts: Options; onBack: () => v
     let stop = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const tick = () =>
-      get<Session>(`/api/sessions/${id}`).then(
+      get<Session>(`api/sessions/${id}`).then(
         (x) => {
           if (stop) return;
           setS(x);
@@ -932,7 +1009,7 @@ function Done({ id, opts, onBack }: { id: string; opts: Options; onBack: () => v
               const li = new LiveInterview();
               try {
                 await li.prepareAudio();
-                const live = await post<LiveStart & { voice: string }>(`/api/sessions/${id}/debrief`, opts.voices.some((v) => v.id === coachVoice) ? { voice: coachVoice } : {});
+                const live = await post<LiveStart & { voice: string }>(`api/sessions/${id}/debrief`, opts.voices.some((v) => v.id === coachVoice) ? { voice: coachVoice } : {});
                 setUsedVoice(live.voice);
                 pendingDebrief = { li, live };
                 setListening(true);
@@ -952,8 +1029,9 @@ function Done({ id, opts, onBack }: { id: string; opts: Options; onBack: () => v
         )}
         <span className="dim">
           {id}
+          {s.mode === 'learn' ? ' · learn mode' : ''}
           {s.model ? ` · ${s.model}` : ''} ·{' '}
-          <a href={`/api/sessions/${id}`} target="_blank" rel="noopener">
+          <a href={`api/sessions/${id}`} target="_blank" rel="noopener">
             raw JSON
           </a>
         </span>
@@ -988,7 +1066,7 @@ function Done({ id, opts, onBack }: { id: string; opts: Options; onBack: () => v
           opts={opts}
           onRetry={async () => {
             setErr(null);
-            await post(`/api/sessions/${id}/grade`).catch((e) => setErr((e as Error).message));
+            await post(`api/sessions/${id}/grade`).catch((e) => setErr((e as Error).message));
             setReload((n) => n + 1);
           }}
         />
@@ -1031,7 +1109,7 @@ function Done({ id, opts, onBack }: { id: string; opts: Options; onBack: () => v
                 </div>
                 <ul>
                   <li>
-                    <b>Technical:</b> {a.technical}
+                    <b>Content:</b> {a.technical}
                   </li>
                   <li>
                     <b>Structure:</b> {a.structure}

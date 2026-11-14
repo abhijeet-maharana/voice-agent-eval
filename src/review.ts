@@ -58,7 +58,7 @@ const RUBRIC = `You are a senior interview coach. A candidate just finished a mo
 - 9 to 10: would impress a demanding startup CTO: crisp, owns decisions, handles every follow up
 
 Judge three things for every answer:
-1. Technical: compare with the question file (its short answer first, the rest for what senior looks like). Name what was wrong or missing, concretely. For behavioral and screening questions, judge the story instead: situation, task, action, result; what the candidate personally did; a result with a number; no complaints about past employers.
+1. Content (the "technical" field): compare with the question file (its short answer first, the rest for what senior looks like). Name what was wrong or missing, concretely. For technical questions that is accuracy and depth; for behavioral, screening and soft skill questions, judge the story instead: situation, task, action, result; what the candidate personally did; a result with a number; no complaints about past employers.
 2. Structure: did the first sentence answer the question? Two or three clear points? Did it end cleanly, or trail off?
 3. Delivery: from the transcript and the measured metrics: long rambling sentences, fillers, hedging ("I think maybe"), "sir/madam", apologies, answers past 3 minutes.
 
@@ -92,14 +92,25 @@ interviewer_rules is the full new list of rules for the live interviewer (start 
 
 interviewer_bugs: mistakes a prompt rule cannot fix (a broken tool result, audio cut off, a page problem), one line each, or an empty list.`;
 
+/** The rubric plus the candidate's own extra rules (config.json reviewNotes). */
+export function systemPrompt(): string {
+  const notes = loadConfig().reviewNotes;
+  return notes.length ? `${RUBRIC}\n\n## Extra rules from the candidate\n${notes.map((n) => `- ${n}`).join('\n')}` : RUBRIC;
+}
+
 const mmss = (seconds: number) => `${Math.floor((seconds || 0) / 60)}:${String(Math.floor((seconds || 0) % 60)).padStart(2, '0')}`;
 
 /** Everything Claude needs about one session, as one user message. */
 export function reviewInput(s: Session): string {
   const config = loadConfig();
   const round = config.rounds.find((r) => r.id === s.round);
+  const learn = s.mode === 'learn';
   const out: string[] = [
     `# Session ${s.id}`,
+    learn
+      ? '- Mode: LEARN. A tutor taught each answer first (the model answer was on the candidate\'s screen) and took their doubts, then called start_recall and the candidate explained the answer back from memory. Score only the explain-back after start_recall for each question; the teaching and the doubts are context. Score a question with no explain-back as 1, "Not explained back". In delivery and the coach notes, judge the explain-back the same way. Treat interviewer_rules as rules for the tutor.'
+      : '- Mode: interview (a realistic call, no help).',
+    ...(round?.reviewFocus ? [`- Focus for this round: ${round.reviewFocus}`] : []),
     `- Round: ${round?.label ?? s.round} (${round?.about ?? ''}), interviewer persona: ${config.personas[s.persona]?.label ?? s.persona}, voice model ${s.model ?? '?'}`,
     `- Length ${mmss(s.durationSeconds ?? 0)}, ended: ${s.endReason ?? ''}`,
     `- Candidate: ${config.candidate.name ? `${config.candidate.name}, ` : ''}${config.candidate.summary}`,
@@ -107,7 +118,7 @@ export function reviewInput(s: Session): string {
     '## Planned questions and their question files',
   ];
   for (const p of s.plan) {
-    const tag = p.added ? 'asked, added live from an answer' : p.asked ? 'asked' : 'not asked';
+    const tag = p.added ? 'asked, added live from an answer' : p.asked ? (learn ? (p.recalled ? 'taught, then explained back' : 'taught, never explained back') : 'asked') : 'not asked';
     out.push('', `### \`${p.id}\` (${tag}): ${p.question}`);
     if (!p.asked) continue;
     const file = questionFile(p.id);
@@ -126,8 +137,8 @@ export function reviewInput(s: Session): string {
       `- ${m.wordsPerMinute ?? 'n/a'} words per minute over ${m.candidateSeconds}s of answers, ${m.fillersPerMinute ?? 'n/a'} fillers per minute (${fillers}), ${m.avgWordsPerSentence ?? 'n/a'} words per sentence, longest answer ${m.longestAnswerSeconds}s, sir/madam ${m.sirMadam}, apologies ${m.apologies}`,
     );
   }
-  out.push('', '## Tool calls the interviewer made, in order');
-  for (const c of s.toolCalls) out.push(`- ${c.at.slice(11, 19)} ${c.name}(${JSON.stringify(c.args)})${c.error ? ` ERROR ${c.error}` : ''}`);
+  out.push('', `## Tool calls the ${learn ? 'tutor' : 'interviewer'} made, in order (times match the transcript)`);
+  for (const c of s.toolCalls) out.push(`- ${c.t !== undefined ? `[${mmss(c.t)}]` : c.at.slice(11, 19)} ${c.name}(${JSON.stringify(c.args)})${c.error ? ` ERROR ${c.error}` : ''}`);
   out.push('', '## Transcript (machine speech to text: expect misheard words)');
   for (const t of s.transcript) out.push(`[${mmss(t.start)}] ${t.who === 'interviewer' ? 'Interviewer' : 'Candidate'}: ${t.text.trim()}`);
 
@@ -153,7 +164,7 @@ export function reviewInput(s: Session): string {
     out.push('', '## Recent reviewed sessions (newest first)');
     for (const h of history) {
       const r = loadSession(h.id).review;
-      if (r) out.push(`- ${h.id}: ${r.overall}/10. ${r.summary} Focus: ${r.next_focus.join('; ')}`);
+      if (r) out.push(`- ${h.id}: ${r.overall}/10. ${r.summary ?? ""} Focus: ${(r.next_focus ?? []).join("; ")}`);
     }
   }
   return out.join('\n');
@@ -163,7 +174,7 @@ export function reviewInput(s: Session): string {
 export function reviewPrompt(id: string): string {
   const s = loadSession(id);
   if (s.status === 'live') throw new HttpError(409, 'The session is still live');
-  return `${RUBRIC}\n\nReply with only a JSON object with these fields: overall, summary, answers (question_id, question, score, technical, structure, delivery, rewrite, fix), delivery, next_focus, coach_notes (recurring_gaps, getting_better, drill_next), interviewer_rules, interviewer_bugs.\n\n${reviewInput(s)}`;
+  return `${systemPrompt()}\n\nReply with only a JSON object with these fields: overall, summary, answers (question_id, question, score, technical, structure, delivery, rewrite, fix), delivery, next_focus, coach_notes (recurring_gaps, getting_better, drill_next), interviewer_rules, interviewer_bugs.\n\n${reviewInput(s)}`;
 }
 
 /** Writes the two notes files from the lists Claude returned (each capped at 10 lines). */
@@ -200,7 +211,7 @@ export async function gradeSession(id: string, client: Pick<Anthropic, 'beta'> =
       betas: ['server-side-fallback-2026-07-01'],
       fallbacks: 'default',
       output_config: { effort: 'high', format: betaZodOutputFormat(ReviewOutput) },
-      system: RUBRIC,
+      system: systemPrompt(),
       messages: [{ role: 'user', content: reviewInput(s) }],
     });
     if (response.stop_reason === 'refusal') throw new Error('Claude declined to grade this session');

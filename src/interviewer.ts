@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import type { Config } from './workspace';
 import { HttpError, paths } from './workspace';
 import { MAX_ADDED } from './bank';
-import type { LiveModelId, Round, Session } from './types';
+import type { LiveModelId, Round, Session, TurnTaking } from './types';
 
 /**
  * The live voice: Gemini Live, opened straight from the browser with a short-lived token this server
@@ -93,6 +93,39 @@ export const TOOLS = [
   },
 ] as const;
 
+/**
+ * Learn mode: the same tools minus related_question, plus start_recall. next_question also returns the
+ * answer, which the page shows on screen while the tutor teaches it.
+ */
+export const LEARN_TOOLS = [
+  {
+    name: 'next_question',
+    description: 'Get the next question of the lesson with its model answer (also shown on the candidate\'s screen). Call it at the start and after you finish each question. Returns done=true when the lesson is finished.',
+  },
+  {
+    name: 'reference_answer',
+    description: 'The full notes for a question in the lesson (the short answer and the deeper material), to answer a doubt.',
+    parameters: { type: 'OBJECT', properties: { question_id: { type: 'STRING', description: 'The question_id from next_question.' } }, required: ['question_id'] },
+  },
+  TOOLS[2],
+  TOOLS[3],
+  {
+    name: 'start_recall',
+    description: 'Call when the candidate is ready to explain the answer back. The page hides the answer, and from now on their words for this question are scored. Then ask them to explain it as they would in an interview.',
+    parameters: { type: 'OBJECT', properties: { question_id: { type: 'STRING', description: 'The question_id from next_question.' } }, required: ['question_id'] },
+  },
+  {
+    name: 'record_note',
+    description: 'Silently record how well the candidate explained the answer back (after start_recall). Call once per question, before next_question.',
+    parameters: TOOLS[4].parameters,
+  },
+  {
+    name: 'end_interview',
+    description: 'End the lesson after your closing line: when next_question returns done, time is up, or the candidate asks to stop.',
+    parameters: TOOLS[6].parameters,
+  },
+] as const;
+
 export const DEBRIEF_TOOLS = [
   {
     name: 'end_debrief',
@@ -153,6 +186,7 @@ export function systemInstruction(s: Session, round: Round, config: Config): str
     `- Keep the interview in ${config.language}, even if the candidate switches language.`,
     '- When next_question returns done, or time is nearly up, close politely in one or two sentences, then call end_interview.',
   ];
+  if (round.instructions) lines.push('', `For this round: ${round.instructions}`);
   // What past reviews learned: the candidate's recurring gaps (probed by follow ups) and rules from the
   // interviewer's own past mistakes. Both files are written after each review (review.ts).
   const gaps = notesSection('coach', ['recurring gaps', 'drill next']);
@@ -160,6 +194,33 @@ export function systemInstruction(s: Session, round: Round, config: Config): str
     lines.push('', "What the candidate's coach has seen in earlier mock interviews. Probe these with your follow ups when they come up; never mention this list:", ...gaps);
   const rules = notesSection('interviewer', ['rules']);
   if (rules.length) lines.push('', 'Rules learned from earlier mock calls (follow them):', ...rules);
+  return lines.join('\n');
+}
+
+/** The tutor of learn mode: teach each answer, take doubts, then have the candidate explain it back. */
+export function learnInstruction(s: Session, round: Round, config: Config): string {
+  const lines = [
+    'You are a patient, friendly tutor on a voice call, helping a candidate prepare for job interviews. This is a learning session, not an interview: you teach first, then they practise.',
+    `Candidate: ${candidateLine(config)}`,
+    `Topic: ${round.label}. ${round.about} About ${round.minutes} minutes, ${s.plan.length} question${s.plan.length === 1 ? '' : 's'}.`,
+    ...(round.instructions ? [`For this topic: ${round.instructions}`] : []),
+    '',
+    'For each question, in this order:',
+    '1. Call next_question. It gives the question and a model answer; the same answer is on the candidate\'s screen. Read the question out.',
+    '2. Teach the answer in simple spoken words: the one line headline first, then the 2 or 3 key points, then a short real example of how it shows up at work. Explain why, not just what. Two or three short sentences per turn, then check in: "Does that make sense?"',
+    '3. Ask if they have any doubts. Answer each doubt simply. Use reference_answer for the deeper notes and candidate_background to link the answer to their own projects. If the notes do not cover something, say so; never invent facts.',
+    '4. When they say they are ready (or have no more doubts), call start_recall, then ask them to explain the answer back in their own words, as they would in a real interview. Do not help while they explain.',
+    '5. Then give honest, kind feedback in two or three sentences: what they got right, and the one or two things they missed or said unclearly. Offer one more try if they missed something important.',
+    '6. Call record_note with how well they explained it back, then move on with next_question.',
+    '',
+    'How to speak:',
+    '- Like a good teacher on a call: short sentences, simple words, no lists, no markdown, never read long text word for word.',
+    '- They can say "explain again", "slower", "example", "skip", "next" or "stop" at any time; follow it.',
+    `- Keep the lesson in ${config.language}, even if they switch language.`,
+    '- When next_question returns done, or time is nearly up, close warmly in one or two sentences, then call end_interview.',
+  ];
+  const gaps = notesSection('coach', ['recurring gaps', 'drill next']);
+  if (gaps.length) lines.push('', 'What their coach has seen in earlier sessions. Keep these in mind when you give feedback; never read this list out:', ...gaps);
   return lines.join('\n');
 }
 
@@ -207,8 +268,34 @@ export function debriefInstruction(s: Session, config: Config): string {
   return lines.join('\n');
 }
 
+export const DEFAULT_TURN_TAKING: TurnTaking = { mode: 'auto', pauseMs: 3000 };
+
+/** The page's choice, checked: `auto` with a pause of 0.5 to 10 seconds, or `button`. */
+export function pickTurnTaking(v: unknown): TurnTaking {
+  if (v === undefined || v === null) return DEFAULT_TURN_TAKING;
+  const t = v as Partial<TurnTaking>;
+  if (t.mode !== 'auto' && t.mode !== 'button') throw new HttpError(400, 'turnTaking.mode must be auto or button');
+  const pauseMs = t.pauseMs === undefined ? DEFAULT_TURN_TAKING.pauseMs : Number(t.pauseMs);
+  if (!Number.isFinite(pauseMs) || pauseMs < 500 || pauseMs > 10_000) throw new HttpError(400, 'turnTaking.pauseMs must be 500 to 10000');
+  return { mode: t.mode, pauseMs: Math.round(pauseMs) };
+}
+
+/** The same rule for every voice: thinking pauses are normal. */
+function turnRule(t: TurnTaking): string {
+  return t.mode === 'button'
+    ? 'Turn taking: the candidate presses a Done button when they finish speaking, so each turn you receive is complete. Silence before that is just thinking. Reply to the whole turn.'
+    : 'Turn taking: the candidate may pause for a few seconds to think. A pause is not the end of an answer: never fill the silence, never repeat the question because of it, never answer for them.';
+}
+
+/** Gemini's voice activity detection for the choice: off for `button`; for `auto`, a longer, less eager end of speech. */
+function realtimeInputConfig(t: TurnTaking) {
+  return t.mode === 'button'
+    ? { automaticActivityDetection: { disabled: true }, activityHandling: 'START_OF_ACTIVITY_INTERRUPTS' }
+    : { automaticActivityDetection: { disabled: false, endOfSpeechSensitivity: 'END_SENSITIVITY_LOW', silenceDurationMs: t.pauseMs } };
+}
+
 /** A Gemini Live setup (BidiGenerateContentSetup): audio out in the given voice, both sides transcribed, the given tools. */
-export function liveSetup(model: string, instruction: string, tools: readonly object[], voice: string) {
+export function liveSetup(model: string, instruction: string, tools: readonly object[], voice: string, turnTaking: TurnTaking = DEFAULT_TURN_TAKING) {
   return {
     setup: {
       model: model.startsWith('models/') ? model : `models/${model}`,
@@ -216,7 +303,8 @@ export function liveSetup(model: string, instruction: string, tools: readonly ob
         responseModalities: ['AUDIO'],
         speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } },
       },
-      systemInstruction: { parts: [{ text: instruction }] },
+      systemInstruction: { parts: [{ text: `${instruction}\n\n${turnRule(turnTaking)}` }] },
+      realtimeInputConfig: realtimeInputConfig(turnTaking),
       // Live models may run function calls in the background by default (NON_BLOCKING); the interview
       // waits for each result (the next question, the reference answer), so every tool is BLOCKING.
       tools: [{ functionDeclarations: tools.map((t) => ({ ...t, behavior: 'BLOCKING' })) }],

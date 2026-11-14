@@ -379,3 +379,52 @@ test('cleanup: unanswered sessions go after a day, old ones are compacted, revie
   assert.equal(old.toolCalls[0].result, undefined);
   assert.equal(old.transcript.length, 1);
 });
+
+test('learn mode: the tutor gets the answer, the page shows it, recall hides it, and only the explain-back is scored', async () => {
+  await assert.rejects(m.startSession({ round: 'screening', mode: 'quiz' }, { now: NOW, fetchImpl: okFetch }), /Unknown mode/);
+  const { session, live } = await m.startSession({ round: 'tech', mode: 'learn' }, { now: new Date('2026-11-11T15:00:00Z'), fetchImpl: okFetch });
+  assert.equal(session.mode, 'learn');
+  const tools = (live.setup.setup as any).tools[0].functionDeclarations.map((t: { name: string }) => t.name);
+  assert.deepEqual(tools, ['next_question', 'reference_answer', 'candidate_background', 'job_context', 'start_recall', 'record_note', 'end_interview']);
+  assert.match(prompt(live), /patient, friendly tutor/);
+  assert.match(prompt(live), /call start_recall/);
+  assert.match(live.kickoff, /Start the lesson/);
+
+  const id = session.id;
+  assert.match(m.runTool(id, 'start_recall', { question_id: session.plan[0].id }).error!, /not a question you have asked/);
+  const q = m.runTool(id, 'next_question', {}, new Date(), 12.34).result as any;
+  assert.ok(q.answer.length > 0, 'the short answer');
+  assert.match(q.notes, /Going Deeper/, 'the whole file for the study card');
+  assert.ok(!q.notes.startsWith('# '), 'without the title');
+  assert.match(JSON.stringify(m.runTool(id, 'reference_answer', { question_id: q.question_id }).result), /notes/);
+  assert.match(m.runTool(id, 'related_question', { topic: 'event loop' }).error!, /learn mode/);
+  assert.equal((m.runTool(id, 'start_recall', { question_id: q.question_id }).result as any).ok, true);
+  const s = m.loadSession(id);
+  assert.equal(s.plan[0].recalled, true);
+  assert.equal(s.toolCalls.find((c) => c.name === 'next_question')!.t, 12.3, 'tool calls keep the page clock');
+
+  m.endSession(id, { transcript: [{ who: 'candidate', text: 'The event loop runs callbacks in phases.', start: 20, end: 30 }], durationSeconds: 60 });
+  const input = review.reviewInput(m.loadSession(id));
+  assert.match(input, /Mode: LEARN/);
+  assert.match(input, /taught, then explained back/);
+  assert.match(input, /\[0:12\] next_question/);
+
+  const plain = await m.startSession({ round: 'tech' }, { now: new Date('2026-11-11T15:05:00Z'), fetchImpl: okFetch });
+  assert.equal(plain.session.mode, 'interview', 'interview by default');
+  assert.match(m.runTool(plain.session.id, 'start_recall', { question_id: 'x' }).error!, /only for learn mode/);
+});
+
+test('generic rounds: per round instructions reach the interviewer, review focus reaches the reviewer, defaultMode applies', async () => {
+  const comm = cfg.loadConfig().rounds.find((r) => r.id === 'communication')!;
+  assert.ok(comm.reviewFocus && comm.instructions, 'a communication round ships by default');
+  const { session, live } = await m.startSession({ round: 'communication' }, { now: new Date('2026-11-11T16:00:00Z'), fetchImpl: okFetch });
+  assert.match(prompt(live), /For this round: If an answer rambles/);
+  m.endSession(session.id, { transcript: [{ who: 'candidate', text: 'Hi.', start: 0, end: 1 }], durationSeconds: 5 });
+  assert.match(review.reviewInput(m.loadSession(session.id)), /Focus for this round: This is a communication round/);
+
+  write('config.json', JSON.stringify({ candidate: { name: 'Sam', summary: 'a senior full stack engineer.' }, privateWords: ['Moonlight'], defaultMode: 'learn' }));
+  const learned = await m.startSession({ round: 'screening' }, { now: new Date('2026-11-11T16:01:00Z'), fetchImpl: okFetch });
+  assert.equal(learned.session.mode, 'learn');
+  assert.equal(m.pageOptions(NOW).defaultMode, 'learn');
+  write('config.json', JSON.stringify({ candidate: { name: 'Sam', summary: 'a senior full stack engineer.' }, privateWords: ['Moonlight'] }));
+});

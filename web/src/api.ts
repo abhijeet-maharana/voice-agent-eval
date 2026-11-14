@@ -1,9 +1,11 @@
-// Calls to the local server (src/server.ts). Every answer is { result } or { error }.
+// Calls to the server (src/app.ts). URLs are relative ("api/..."), so the page works under any path prefix.
+// Every answer is { result } or { error }; a login guard in front may add { unlock: <sign-in page URL> }.
 
 export class ApiError extends Error {
   constructor(
     message: string,
     public status: number,
+    public unlock?: string,
   ) {
     super(message);
   }
@@ -17,7 +19,7 @@ async function call<T>(url: string, init?: RequestInit): Promise<T> {
   } catch {
     throw new ApiError(`${res.status} ${res.statusText}`, res.status);
   }
-  if (!res.ok || data.error) throw new ApiError(data.error || `${res.status} ${res.statusText}`, res.status);
+  if (!res.ok || data.error) throw new ApiError(data.error || `${res.status} ${res.statusText}`, res.status, typeof data.unlock === 'string' ? data.unlock : undefined);
   return data.result as T;
 }
 

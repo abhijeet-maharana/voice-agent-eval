@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { CLOSER, MAX_ADDED, bankEntry, dayKey, loadBank, nextDue, pickQuestions, readProgress, relatedQuestion, topicFolders, words } from './bank';
-import { DEBRIEF_TOOLS, TOOLS, VOICES, debriefInstruction, liveConfig, liveModels, liveSetup, mintToken, pickVoice, systemInstruction } from './interviewer';
-import type { LiveModelId, Metrics, Review, ReviewAnswer, Session, ToolCall, TranscriptTurn } from './types';
-import { HttpError, listPrepPacks, loadConfig, paths, profileTexts, readJson, readPrepPack, requireWorkspace, writeJson, writeText } from './workspace';
+import { CLOSER, MAX_ADDED, bankEntry, dayKey, loadBank, nextDue, pickQuestions, questionFile, readProgress, relatedQuestion, topicFolders, words } from './bank';
+import { DEBRIEF_TOOLS, LEARN_TOOLS, TOOLS, VOICES, debriefInstruction, learnInstruction, liveConfig, liveModels, liveSetup, mintToken, pickTurnTaking, pickVoice, systemInstruction } from './interviewer';
+import type { LiveModelId, Metrics, Mode, Progress, Review, ReviewAnswer, Session, ToolCall, TranscriptTurn } from './types';
+import { HttpError, listPrepPacks, loadConfig, paths, profileTexts, readJson, readPrepPack, requireWorkspace, scrub, writeJson, writeText } from './workspace';
 
 /**
  * One mock interview, start to finish:
@@ -74,6 +74,10 @@ export interface StartInput {
   model?: string;
   /** A VOICES name; default GEMINI_LIVE_VOICE (Kore). */
   voice?: string;
+  /** `interview` or `learn`; default: config.json defaultMode. */
+  mode?: string;
+  /** `{ mode: 'auto', pauseMs }` or `{ mode: 'button' }`; default auto, 3 seconds. */
+  turnTaking?: unknown;
 }
 
 export async function startSession(input: StartInput, opts: { now?: Date; fetchImpl?: typeof fetch } = {}) {
@@ -88,8 +92,11 @@ export async function startSession(input: StartInput, opts: { now?: Date; fetchI
   if (input.topic && (!round.topicPick || !topicFolders(bank).includes(input.topic))) throw new HttpError(400, 'Unknown topic');
   const models = liveModels();
   if (input.model && !(input.model in models)) throw new HttpError(400, `Unknown model. Pick one of: ${Object.keys(models).join(', ')}`);
+  if (input.mode && input.mode !== 'interview' && input.mode !== 'learn') throw new HttpError(400, 'Unknown mode. Pick interview or learn');
+  const mode: Mode = (input.mode as Mode | undefined) ?? config.defaultMode;
   const modelChoice = (input.model as LiveModelId | undefined) ?? round.model;
   const voice = pickVoice(input.voice, liveConfig().voice);
+  const turnTaking = pickTurnTaking(input.turnTaking);
   const now = opts.now ?? new Date();
   const questions = pickQuestions(round, bank, readProgress(), { topic: input.topic, now });
   if (!questions.length) throw new HttpError(400, `No questions for the ${round.label} round. Add files to ${Object.keys(round.mix).map((f) => `questions/${f}/`).join(', ')}`);
@@ -102,9 +109,11 @@ export async function startSession(input: StartInput, opts: { now?: Date; fetchI
     persona,
     topic: input.topic,
     prepPack: input.prepPack,
+    mode,
     modelChoice,
     model: models[modelChoice].model,
     voice,
+    turnTaking,
     createdAt: now.toISOString(),
     status: 'live',
     plan: questions.map((q) => ({ id: q.id, question: q.question, asked: false })),
@@ -113,8 +122,12 @@ export async function startSession(input: StartInput, opts: { now?: Date; fetchI
     transcript: [],
   };
   saveSession(session);
-  const setup = liveSetup(session.model!, systemInstruction(session, round, config), TOOLS, voice);
-  return { session, live: { wsUrl: liveConfig().wsUrl, token, setup } };
+  const setup =
+    mode === 'learn'
+      ? liveSetup(session.model!, learnInstruction(session, round, config), LEARN_TOOLS, voice, turnTaking)
+      : liveSetup(session.model!, systemInstruction(session, round, config), TOOLS, voice, turnTaking);
+  const kickoff = mode === 'learn' ? '(The candidate has joined the call. Start the lesson now.)' : '(The candidate has joined the call. Start the interview now.)';
+  return { session, live: { wsUrl: liveConfig().wsUrl, token, setup, kickoff } };
 }
 
 // ---------- Tool calls ----------
@@ -141,13 +154,23 @@ export function searchBackground(query: string, prepPack?: string): string[] {
     .map((s) => s.line);
 }
 
-export function runTool(id: string, name: string, args: Record<string, unknown>, now = new Date()): ToolCall {
+/** A question file's text for the lesson: everything after the title, private lines dropped, capped. */
+export function lessonNotes(id: string): string {
+  const file = questionFile(id);
+  if (!file) return '';
+  const text = scrub(fs.readFileSync(file, 'utf8'));
+  return text.replace(/^[\s\S]*?^# .+$\n?/m, '').trim().slice(0, 6000);
+}
+
+/** Runs one tool call from the live voice. `t`: seconds since the session started, on the page's clock. */
+export function runTool(id: string, name: string, args: Record<string, unknown>, now = new Date(), t?: number): ToolCall {
   const s = loadSession(id);
   if (s.status !== 'live') throw new HttpError(409, 'This session has ended');
   const started = Date.now();
   let result: unknown;
   let error: string | undefined;
   const planned = (qid: unknown) => s.plan.find((p) => p.id === qid);
+  const learn = s.mode === 'learn';
   try {
     switch (name) {
       case 'next_question': {
@@ -158,12 +181,24 @@ export function runTool(id: string, name: string, args: Record<string, unknown>,
         }
         s.plan[i].asked = true;
         result = { done: false, number: i + 1, of: s.plan.length, question_id: s.plan[i].id, question: s.plan[i].question };
+        // The lesson: the answer goes to the tutor and onto the candidate's screen.
+        if (learn) result = { ...(result as object), answer: bankEntry(s.plan[i].id)?.short || 'No answer on file.', notes: lessonNotes(s.plan[i].id) };
         break;
       }
       case 'reference_answer': {
         const q = planned(args.question_id);
         if (!q) throw new Error('question_id is not in this interview plan');
-        result = { question: q.question, strong_answer_covers: bankEntry(q.id)?.short || 'No reference answer on file.' };
+        result = learn
+          ? { question: q.question, notes: lessonNotes(q.id) || 'No notes on file.' }
+          : { question: q.question, strong_answer_covers: bankEntry(q.id)?.short || 'No reference answer on file.' };
+        break;
+      }
+      case 'start_recall': {
+        if (!learn) throw new Error('start_recall is only for learn mode');
+        const q = planned(args.question_id);
+        if (!q || !q.asked) throw new Error('question_id is not a question you have asked');
+        q.recalled = true;
+        result = { ok: true, message: 'The answer is hidden on their screen now. Ask them to explain it back in their own words, and do not help while they do.' };
         break;
       }
       case 'candidate_background': {
@@ -183,6 +218,7 @@ export function runTool(id: string, name: string, args: Record<string, unknown>,
         break;
       }
       case 'related_question': {
+        if (learn) throw new Error('Not available in learn mode. Continue with next_question.');
         const round = loadConfig().rounds.find((r) => r.id === s.round);
         if (!round?.followUps) throw new Error('This round has fixed questions. Continue with next_question.');
         if (s.plan.filter((p) => p.added).length >= MAX_ADDED) throw new Error(`Already added ${MAX_ADDED} questions from the candidate's answers. Continue with next_question.`);
@@ -214,7 +250,7 @@ export function runTool(id: string, name: string, args: Record<string, unknown>,
     error = (err as Error).message;
     result = { error };
   }
-  const call: ToolCall = { at: now.toISOString(), name, args, result, ms: Date.now() - started, ...(error ? { error } : {}) };
+  const call: ToolCall = { at: now.toISOString(), name, args, result, ms: Date.now() - started, ...(error ? { error } : {}), ...(t !== undefined && Number.isFinite(t) ? { t: Math.round(t * 10) / 10 } : {}) };
   s.toolCalls.push(call);
   saveSession(s);
   return call;
@@ -348,21 +384,53 @@ export function saveReview(id: string, body: any, now = new Date(), reviewer = '
   // Progress counts each session once, so a re-posted review does not double the history.
   if (first) {
     const progress = readProgress();
-    for (const a of answers) {
-      if (!s.plan.some((p) => p.id === a.question_id)) continue;
-      const old = progress[a.question_id] ?? { asked: 0, scores: [], lastAsked: '', nextDue: '', failStreak: 0 };
-      progress[a.question_id] = {
-        asked: old.asked + 1,
-        scores: [...old.scores, a.score].slice(-10),
-        lastAsked: dayKey(now),
-        nextDue: nextDue(a.score, a.score < 6 ? old.failStreak : 0, now),
-        failStreak: a.score < 6 ? old.failStreak + 1 : 0,
-      };
-    }
+    applyReview(progress, s, now);
     writeJson(paths.progress(), progress);
   }
   writeText(reportFile(id), reportMarkdown(s));
   return { session: s, report: path.relative(process.cwd(), reportFile(id)) };
+}
+
+/** Adds one reviewed session's scores to the spaced repetition record. */
+function applyReview(progress: Progress, s: Session, at: Date): void {
+  for (const a of s.review?.answers ?? []) {
+    if (!s.plan.some((p) => p.id === a.question_id)) continue;
+    const old = progress[a.question_id] ?? { asked: 0, scores: [], lastAsked: '', nextDue: '', failStreak: 0 };
+    progress[a.question_id] = {
+      asked: old.asked + 1,
+      scores: [...old.scores, a.score].slice(-10),
+      lastAsked: dayKey(at),
+      nextDue: nextDue(a.score, a.score < 6 ? old.failStreak : 0, at),
+      failStreak: a.score < 6 ? old.failStreak + 1 : 0,
+    };
+  }
+}
+
+/** Rebuilds progress.json from every reviewed session left on disk, oldest first. */
+export function rebuildProgress(): Progress {
+  const dir = paths.sessions();
+  const reviewed = (fs.existsSync(dir) ? fs.readdirSync(dir) : [])
+    .filter((f) => f.endsWith('.json'))
+    .map((f) => readJson<Session | null>(path.join(dir, f), null))
+    .filter((s): s is Session => !!s?.review?.reviewedAt && Array.isArray(s.review.answers))
+    .sort((a, b) => a.review!.reviewedAt.localeCompare(b.review!.reviewedAt));
+  const progress: Progress = {};
+  for (const s of reviewed) applyReview(progress, s, new Date(s.review!.reviewedAt));
+  writeJson(paths.progress(), progress);
+  return progress;
+}
+
+/**
+ * Deletes a session and its report, then rebuilds progress.json without it, so its questions count as
+ * never asked (unless another session asked them). coach-notes.md and interviewer-notes.md are summaries
+ * and stay as they are; edit them by hand if they mention it.
+ */
+export function deleteSession(id: string) {
+  loadSession(id);
+  fs.rmSync(sessionFile(id), { force: true });
+  fs.rmSync(reportFile(id), { force: true });
+  const progress = rebuildProgress();
+  return { deleted: id, questionsTracked: Object.keys(progress).length };
 }
 
 export function reportMarkdown(s: Session): string {
@@ -394,7 +462,7 @@ export function reportMarkdown(s: Session): string {
       `### ${a.score}/10 · ${a.question}`,
       a.question_id ? `\`questions/${a.question_id}.md\`` : '',
       '',
-      `- **Technical:** ${a.technical}`,
+      `- **Content:** ${a.technical}`,
       `- **Structure:** ${a.structure}`,
       `- **Delivery:** ${a.delivery}`,
       `- **Fix next time:** ${a.fix}`,
@@ -417,12 +485,13 @@ export function reportMarkdown(s: Session): string {
 // ---------- Spoken debrief ----------
 
 /** Starts a spoken debrief of a reviewed session: a Gemini Live token and setup for the coach voice. */
-export async function startDebrief(id: string, opts: { fetchImpl?: typeof fetch; voice?: unknown } = {}) {
+export async function startDebrief(id: string, opts: { fetchImpl?: typeof fetch; voice?: unknown; turnTaking?: unknown } = {}) {
   const s = loadSession(id);
   if (!s.review) throw new HttpError(409, 'This session has no review yet');
   const voice = pickVoice(opts.voice, liveConfig().voice);
+  const turnTaking = pickTurnTaking(opts.turnTaking);
   const token = await mintToken(20, opts.fetchImpl);
-  return { wsUrl: liveConfig().wsUrl, token, voice, setup: liveSetup(liveModels().fast.model, debriefInstruction(s, loadConfig()), DEBRIEF_TOOLS, voice) };
+  return { wsUrl: liveConfig().wsUrl, token, voice, turnTaking, setup: liveSetup(liveModels().fast.model, debriefInstruction(s, loadConfig()), DEBRIEF_TOOLS, voice, turnTaking) };
 }
 
 /** Keeps the debrief's transcript with the session (the last 10), so practice attempts stay in the history. */
@@ -486,6 +555,7 @@ export function pageOptions(now = new Date(), grading = false) {
     models: Object.entries(liveModels()).map(([id, m]) => ({ id, ...m })),
     voices: Object.entries(VOICES).map(([id, style]) => ({ id, style })),
     defaultVoice: liveConfig().voice,
+    defaultMode: config.defaultMode,
     rounds: config.rounds.map(({ only: _only, mix, ...r }) => ({ ...r, questions: Object.values(mix).reduce((a, b) => a + b, 0) })),
     personas: Object.entries(config.personas).map(([id, p]) => ({ id, label: p.label })),
     topics: topicFolders(bank),

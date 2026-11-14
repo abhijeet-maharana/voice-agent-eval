@@ -114,3 +114,11 @@ code { font-family: var(--mono); background: var(--card); border: 1px solid var(
   .main { padding: 20px 16px 60px; }
   .controls { margin-left: 0; }
 }
+
+/* Learn mode: the study card */
+.lesson-q { display: block; color: var(--heading); font-size: 16px; margin-bottom: 8px; }
+.md { max-height: 46vh; overflow-y: auto; }
+.md h4 { margin: 12px 0 4px; font-size: 13px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--dim); }
+.md p { margin: 0 0 8px; }
+.md .md-li { margin: 0 0 4px; padding-left: 4px; }
+.md .md-code { font-family: var(--mono); font-size: 12.5px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 8px; }

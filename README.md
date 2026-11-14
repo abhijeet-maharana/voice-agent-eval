@@ -5,6 +5,8 @@ A live AI interviewer you talk to out loud. Gemini Live asks the questions and f
 - **Real voice, real pressure.** You answer out loud, it listens and digs into your answer with follow ups, like a real interviewer.
 - **Your material.** Questions, resume and company prep notes are plain markdown files in your own folder. Nothing is committed.
 - **Nothing hidden.** Every tool the interviewer calls (next question, reference answer, your background) shows on screen with its arguments and result.
+- **Any kind of interview.** Frontend, backend, databases, system design, soft skills, communication: a round is a few lines of config pointing at your question folders.
+- **Learn mode.** A tutor shows the answer, teaches it, takes your doubts, then asks you to explain it back. Only your explanation is scored.
 - **Gets better each session.** Weak answers come back sooner (spaced repetition). Your recurring gaps get probed in the next call, and the interviewer learns from its own mistakes.
 
 ## How it works
@@ -26,7 +28,7 @@ A live AI interviewer you talk to out loud. Gemini Live asks the questions and f
                                              └──────────────────────────────┘
 ```
 
-1. You pick a round (recruiter screen, behavioral, tech deep dive, system design, real company interview, AI video screen).
+1. You pick a mode (interview or learn) and a round (recruiter screen, behavioral, tech deep dive, system design, communication, real company interview, AI video screen, or your own).
 2. The server picks questions from your bank: ones due for repeat first, then new ones. It mints a one-use Gemini token. Your API key never reaches the browser.
 3. The browser talks to Gemini Live directly. When the interviewer needs something (the next question, what a strong answer covers, a line from your resume), it calls a tool, and the page runs it on the server and shows it.
 4. When the call ends, the server measures delivery (words per minute, fillers, longest answer) and Claude grades the transcript.
@@ -127,6 +129,67 @@ The default rounds use the example folders (`screening`, `behavioral`, `nodejs`,
 | `job` | Whether a prep pack is `required`, `optional`, or not used (`none`) |
 | `only` | Optional regular expression that question ids must match |
 | `topicPick` | Lets you narrow the round to a single folder on the start screen |
+| `instructions` | Extra lines for the interviewer in this round, e.g. what to dig into |
+| `reviewFocus` | What the reviewer should weigh most, e.g. delivery over depth in a communication round |
+
+### Interviewer types
+
+Every interview type is the same engine with different settings: a question folder, a persona, how hard it follows up, and what the review weighs. Some examples for `config.json`:
+
+```json
+{
+  "personas": {
+    "staff-frontend": { "label": "Staff frontend engineer", "text": "A staff frontend engineer. Cares about rendering, state, performance budgets and accessibility. Asks how things behave in the browser, not just what the API is." },
+    "dba": { "label": "Database engineer", "text": "A senior database engineer. Digs into indexes, query plans, transactions, isolation levels and what happens under load." },
+    "people-lead": { "label": "People lead", "text": "A warm but sharp people manager. Wants honest stories about conflict, feedback and ownership, with what the candidate personally did." }
+  },
+  "rounds": [
+    { "id": "frontend", "label": "Frontend", "about": "React, CSS, browser performance, accessibility.", "mix": { "react": 3, "css": 1, "a11y": 1 }, "minutes": 25, "followUps": 2, "persona": "staff-frontend", "model": "fast", "job": "optional", "topicPick": true },
+    { "id": "backend", "label": "Backend", "about": "APIs, queues, caching, failure handling.", "mix": { "nodejs": 2, "api-design": 2, "queues": 1 }, "minutes": 25, "followUps": 2, "persona": "cto", "model": "fast", "job": "optional", "topicPick": true },
+    { "id": "databases", "label": "Databases", "about": "Postgres, indexing, transactions, scaling reads and writes.", "mix": { "postgres": 3, "data-modeling": 1 }, "minutes": 25, "followUps": 3, "persona": "dba", "model": "thinking", "job": "none", "instructions": "Ask for the query plan or the index they would add whenever it fits." },
+    { "id": "system-design", "label": "System design", "about": "One design end to end.", "mix": { "system-design": 1 }, "minutes": 40, "followUps": 6, "persona": "bigtech", "model": "thinking", "job": "none", "only": "design-" },
+    { "id": "soft-skills", "label": "Soft skills", "about": "Conflict, feedback, ownership, working across time zones.", "mix": { "behavioral": 4 }, "minutes": 20, "followUps": 2, "persona": "people-lead", "model": "fast", "job": "optional", "reviewFocus": "Judge the story: situation, what they personally did, the result, what they learned." },
+    { "id": "communication", "label": "Communication", "about": "Short, clear spoken answers.", "mix": { "screening": 2, "behavioral": 2 }, "minutes": 15, "followUps": 1, "persona": "manager", "model": "fast", "job": "none", "reviewFocus": "Weigh structure and delivery (headline first, short sentences, no filler, a concrete example) more than depth." }
+  ]
+}
+```
+
+Add the matching folders under `questions/` (`questions/postgres/`, `questions/css/`, ...) and they show up on the start screen. The default config already has a communication round.
+
+### Learn mode
+
+Pick **Learn** on the start screen (or set `"defaultMode": "learn"` in `config.json` to make it the default). It turns the interviewer into a tutor:
+
+1. It reads out the question, and the model answer from your question file appears on screen.
+2. It teaches the answer in simple spoken words: the headline, the key points, an example. Ask any doubt ("why?", "give me an example", "explain again"); it answers from your notes and says so when the notes don't cover something.
+3. When you say you're ready, it hides the answer and asks you to explain it back, as you would in an interview.
+4. It tells you what you got and what you missed, lets you try once more, then moves on.
+
+After the call, Claude grades only your explain-back answers (not your doubts) and updates spaced repetition, so the questions you struggled to explain come back sooner. Switch to **Interview** mode once the answers stick.
+
+### Using an existing notes folder
+
+Already keep interview notes somewhere else? Point the workspace at them instead of copying. Paths in `config.json` are relative to the workspace folder:
+
+```json
+{
+  "paths": {
+    "questions": "../qna",
+    "profile": ["../resume.md", "../about-me.md"],
+    "prep": "../qna/interviews",
+    "reports": "reports"
+  },
+  "skip": { "folders": ["dsa", "interviews"], "files": "^(00-|playbook)" },
+  "reviewNotes": ["Use numbers from resume.md only, never from the question files."]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `paths` | Move any part: `questions`, `profile` (a folder or a list of files), `prep`, `sessions`, `reports`, `progress`, `coachNotes`, `interviewerNotes` |
+| `skip.folders` | Question folders that are not spoken questions (code exercises, notes) |
+| `skip.files` | A regular expression for question file names to skip |
+| `reviewNotes` | Extra rules for the reviewer, added to Claude's prompt |
 
 ## Grading
 
@@ -143,6 +206,27 @@ curl -X POST localhost:4747/api/sessions/<session id>/review \
 
 `npm run review -- <session id>` grades an ended session again (for example after an API error).
 
+## Run it inside another app
+
+The whole app is one Express router, so an existing dashboard can serve it under its own path, login and env:
+
+```ts
+import { createInterviewApp } from 'voice-interviewer'; // or a path to src/app.ts
+
+app.use(
+  '/interview',
+  createInterviewApp({
+    workspace: '/path/to/notes',          // sets WORKSPACE
+    guard: requireLogin,                   // runs before starting a call, grading and debriefs
+    onReview: (event) => notifyMe(event),  // after each review, or when grading fails
+  }),
+);
+```
+
+The page uses relative URLs, so it works under any prefix and behind a reverse proxy. A guard can answer `401` with `{ "error": "...", "unlock": "/login" }` and the page shows a **Sign in** link. The browser still needs `localhost` or HTTPS for the microphone.
+
+Standalone, set `REVIEW_WEBHOOK_URL` to get the same review event as a JSON `POST`. To load settings from a different env file, set `DOTENV_CONFIG_PATH`.
+
 ## Cost
 
 - **Gemini Live:** billed per minute of audio by Google. Check the current Live API pricing for your model.
@@ -158,7 +242,8 @@ npm run check      # typecheck + tests (no network, no API keys needed)
 
 | File | What it does |
 |---|---|
-| `src/server.ts` | HTTP API and the built page |
+| `src/app.ts` | The router: HTTP API, the built page, review hooks |
+| `src/server.ts` | The standalone server around it |
 | `src/sessions.ts` | Start, tool calls, end, metrics, review, report, debrief, cleanup |
 | `src/interviewer.ts` | Gemini Live setup: system prompt, tools, voices, token |
 | `src/bank.ts` | Question bank parsing, spaced repetition, picking questions |
