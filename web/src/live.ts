@@ -5,6 +5,9 @@
 
 export type LiveState = 'connecting' | 'listening' | 'speaking' | 'reconnecting' | 'closed';
 
+/** Button mode only: whose turn it is. `waiting`: you pressed Done and the voice has not answered yet. */
+export type Turn = 'theirs' | 'yours' | 'waiting';
+
 export interface FunctionCall {
   id: string;
   name: string;
@@ -24,6 +27,8 @@ export interface LiveHandlers {
   onClose(reason?: string): void;
   /** A connection event for the page's log (also saved with the session, for debugging). */
   onLog(event: string, detail?: string): void;
+  /** Button mode: the turn changed. */
+  onTurn?(turn: Turn): void;
 }
 
 // Mic: resamples to 16 kHz Int16 and posts 100 ms chunks with their loudness.
@@ -71,6 +76,15 @@ export class LiveInterview {
   private player?: AudioWorkletNode;
   playing = false;
   muted = false;
+  paused = false;
+  /**
+   * `auto`: Gemini notices when you stop talking. `button`: its voice activity detection is off (set in the
+   * server's setup), and the page opens your turn after each reply and closes it when you press Done.
+   */
+  turnMode: 'auto' | 'button' = 'auto';
+  private turnOpen = false;
+  /** Extended thinking: a filler ended while a background tool still runs; the real end of turn is still to come. */
+  private fillerPending = false;
   /** Audio chunks received in the current model turn, and what was logged once already. */
   private turnAudio = 0;
   private totalAudio = 0;
@@ -131,8 +145,11 @@ export class LiveInterview {
     this.micNode.port.onmessage = (e) => {
       this.h?.onLevel(e.data.rms);
       if (e.data.rms > this.micPeak) this.micPeak = e.data.rms;
-      if (this.muted || !this.ready || this.ws?.readyState !== WebSocket.OPEN) return;
-      if (this.playing && e.data.rms < BARGE_IN_RMS) return;
+      if (this.muted || this.paused || !this.ready || this.ws?.readyState !== WebSocket.OPEN) return;
+      if (this.turnMode === 'button') {
+        // Only inside your turn, and not while its voice plays (the speaker would leak into your answer).
+        if (!this.turnOpen || this.playing) return;
+      } else if (this.playing && e.data.rms < BARGE_IN_RMS) return;
       this.micSent++;
       this.send({ realtimeInput: { audio: { mimeType: 'audio/pcm;rate=16000', data: toBase64(e.data.pcm) } } });
     };
@@ -205,6 +222,8 @@ export class LiveInterview {
         clearTimeout(timer);
         this.ready = true;
         this.h?.onState('listening');
+        // A resumed connection: your turn was open, so open it again on the new socket.
+        if (this.turnMode === 'button' && this.turnOpen) this.send({ realtimeInput: { activityStart: {} } });
         ws.onmessage = (ev) => {
           this.msgs++;
           this.lastMsgAt = performance.now();
@@ -265,10 +284,20 @@ export class LiveInterview {
         this.log('interrupted', 'you talked over it, or noise did');
         this.player?.port.postMessage('flush');
       }
-      if (c.turnComplete) {
+      // Extended thinking speaks a filler ("one moment…") while a background tool runs and ends it with
+      // turnComplete plus interactionStatus IN_PROGRESS: it is not done, so the candidate's turn must not
+      // open yet. It is done at the next turnComplete without IN_PROGRESS, or at a separate IDLE status.
+      const working = c.interactionStatus === 'IN_PROGRESS';
+      if (c.turnComplete && working) {
+        this.log('filler done', `${this.turnAudio} audio chunks, still working (IN_PROGRESS)`);
+        this.turnAudio = 0;
+        this.fillerPending = true;
+      } else if (c.turnComplete || (c.interactionStatus === 'IDLE' && this.fillerPending)) {
         this.log('turn complete', `${this.turnAudio} audio chunks${c.interactionStatus ? `, ${c.interactionStatus}` : ''}`);
         this.turnAudio = 0;
+        this.fillerPending = false;
         this.h?.onTurnComplete();
+        if (this.turnMode === 'button' && !this.turnOpen) this.openTurn();
       }
     }
     const calls = msg.toolCall?.functionCalls as Array<{ id?: string; name: string; args?: Record<string, unknown> }> | undefined;
@@ -310,7 +339,43 @@ export class LiveInterview {
 
   setMuted(muted: boolean): void {
     this.muted = muted;
-    if (muted) this.send({ realtimeInput: { audioStreamEnd: true } });
+    if (muted && this.turnMode === 'auto') this.send({ realtimeInput: { audioStreamEnd: true } });
+  }
+
+  /** Button mode: your turn starts (after each reply, or when you interrupt). */
+  private openTurn(): void {
+    this.turnOpen = true;
+    this.send({ realtimeInput: { activityStart: {} } });
+    this.log('your turn', 'activityStart');
+    this.h?.onTurn?.('yours');
+  }
+
+  /** Button mode: you finished; the voice may answer now. */
+  done(): void {
+    if (this.turnMode !== 'button' || !this.turnOpen) return;
+    this.turnOpen = false;
+    this.send({ realtimeInput: { activityEnd: {} } });
+    this.log('done answering', 'activityEnd');
+    this.h?.onTurn?.('waiting');
+  }
+
+  /** Button mode: cut its voice off and take the turn. */
+  interrupt(): void {
+    if (this.turnMode !== 'button' || this.turnOpen) return;
+    this.player?.port.postMessage('flush');
+    this.log('interrupted by you');
+    this.openTurn();
+  }
+
+  /**
+   * Pause (someone walked in): nothing from the mic goes out and its voice freezes mid-sentence; Resume
+   * carries on from the same word. The connection stays open, and nothing is sent, so it just waits.
+   */
+  async setPaused(paused: boolean): Promise<void> {
+    this.paused = paused;
+    this.log(paused ? 'paused' : 'resumed');
+    if (paused) await this.outCtx?.suspend();
+    else await this.outCtx?.resume();
   }
 
   /** Resolves once the interviewer's queued speech has played out (or after `maxMs`). */

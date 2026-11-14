@@ -58,7 +58,7 @@ The microphone works on `localhost` without HTTPS. The server has no login and b
 
 | Path | What goes in it |
 |---|---|
-| `config.json` | Your name and a one-line summary, the interview language, private words, and optionally your own rounds and personas |
+| `config.json` | Your name and a one-line summary, the interview language, an optional `accent` for the voice (e.g. `"Indian"`), an optional `secondLanguage` (e.g. `"Hindi"`: the tutor and the coach answer it in Hinglish, technical terms in English; the interview stays in English), private words, and optionally your own rounds and personas |
 | `questions/<topic>/*.md` | The question bank. One file per question (format below) |
 | `profile/*.md` | Your resume and anything about you the interviewer may look up for follow ups |
 | `prep/*.md` | One file per real interview: company, role, stack, likely questions. The "Real interview" round needs one |
@@ -125,7 +125,7 @@ The default rounds use the example folders (`screening`, `behavioral`, `nodejs`,
 | `mix` | Question folder to how many questions it gives |
 | `followUps` | Follow ups per main question. `0` makes a scripted screen with no reactions |
 | `persona` | `recruiter`, `manager`, `cto`, `bigtech`, `aiscreen`, or your own under `personas` |
-| `model` | `fast` (replies in about a second) or `thinking` (sharper follow ups, longer pauses) |
+| `model` | `fast` (replies in about a second; the default for the built-in rounds) or `thinking` (extended thinking: sharper follow ups, longer pauses; it runs its tools in the background and may say a short filler while it looks something up). On 2026-11-14 extended thinking never made a tool call (it says "a system error occurred"), so check it first with `npm run smoke:live thinking`; `GEMINI_LIVE_THINKING_LEVEL` sets low (default), medium or high |
 | `job` | Whether a prep pack is `required`, `optional`, or not used (`none`) |
 | `only` | Optional regular expression that question ids must match |
 | `topicPick` | Lets you narrow the round to a single folder on the start screen |
@@ -156,9 +156,20 @@ Every interview type is the same engine with different settings: a question fold
 
 Add the matching folders under `questions/` (`questions/postgres/`, `questions/css/`, ...) and they show up on the start screen. The default config already has a communication round.
 
+### During a call
+
+| Control | What it does |
+|---|---|
+| **When you finish answering** (start form) | **Button** (the default) never replies until you press **Done answering** (or Space): take as long as you like. **Auto** replies after a pause you choose (1.5, 3 or 6 seconds), so thinking pauses don't cut you off. In Button mode, **Interrupt** (or Space) cuts its voice off and gives you the turn |
+| **Pause** (or P) | Someone walked in: your mic stops, its voice freezes mid-sentence, and the screen is covered. **Resume** carries on from the same word |
+| **Mute** | Stops your mic only |
+| **Delete** (past sessions, or on a review) | Forgets a session: its file, its report, and its effect on spaced repetition (rebuilt from the sessions left). The coach notes are a summary and stay; edit them by hand if needed |
+
+The choice is remembered in your browser and also applies to the spoken review.
+
 ### Learn mode
 
-Pick **Learn** on the start screen (or set `"defaultMode": "learn"` in `config.json` to make it the default). It turns the interviewer into a tutor:
+Pick **Learn** on the start screen (or set `"defaultMode": "learn"` in `config.json` to make it the default). It turns the interviewer into a warm, slow-speaking tutor (voice **Sulafat** by default; change it with **Tutor voice** or `GEMINI_LIVE_TUTOR_VOICE`):
 
 1. It reads out the question, and the model answer from your question file appears on screen.
 2. It teaches the answer in simple spoken words: the headline, the key points, an example. Ask any doubt ("why?", "give me an example", "explain again"); it answers from your notes and says so when the notes don't cover something.
@@ -217,7 +228,7 @@ app.use(
   '/interview',
   createInterviewApp({
     workspace: '/path/to/notes',          // sets WORKSPACE
-    guard: requireLogin,                   // runs before starting a call, grading and debriefs
+    guard: requireLogin,                   // runs before every write (POST/DELETE); reads stay open
     onReview: (event) => notifyMe(event),  // after each review, or when grading fails
   }),
 );

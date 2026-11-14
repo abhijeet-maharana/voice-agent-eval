@@ -108,7 +108,7 @@ export function reviewInput(s: Session): string {
   const out: string[] = [
     `# Session ${s.id}`,
     learn
-      ? '- Mode: LEARN. A tutor taught each answer first (the model answer was on the candidate\'s screen) and took their doubts, then called start_recall and the candidate explained the answer back from memory. Score only the explain-back after start_recall for each question; the teaching and the doubts are context. Score a question with no explain-back as 1, "Not explained back". In delivery and the coach notes, judge the explain-back the same way. Treat interviewer_rules as rules for the tutor.'
+      ? '- Mode: LEARN. A tutor taught each answer first (the model answer was on the candidate\'s screen) and took their doubts, then called start_recall and the candidate explained the answer back from memory. Score only the explain-back after start_recall for each question; the teaching and the doubts are context. Score a question with no explain-back as 1, "Not explained back". In delivery and the coach notes, judge the explain-back the same way. The interviewer rules are for real interviews, not the tutor: return interviewer_rules exactly as the current rules below, and put any tutor problems in interviewer_bugs.'
       : '- Mode: interview (a realistic call, no help).',
     ...(round?.reviewFocus ? [`- Focus for this round: ${round.reviewFocus}`] : []),
     `- Round: ${round?.label ?? s.round} (${round?.about ?? ''}), interviewer persona: ${config.personas[s.persona]?.label ?? s.persona}, voice model ${s.model ?? '?'}`,
@@ -177,14 +177,18 @@ export function reviewPrompt(id: string): string {
   return `${systemPrompt()}\n\nReply with only a JSON object with these fields: overall, summary, answers (question_id, question, score, technical, structure, delivery, rewrite, fix), delivery, next_focus, coach_notes (recurring_gaps, getting_better, drill_next), interviewer_rules, interviewer_bugs.\n\n${reviewInput(s)}`;
 }
 
-/** Writes the two notes files from the lists Claude returned (each capped at 10 lines). */
-export function writeNotes(out: Pick<ReviewOutput, 'coach_notes' | 'interviewer_rules'>, sessionId: string, now = new Date()): void {
+/**
+ * Writes the two notes files from the lists Claude returned (each capped at 10 lines). Without
+ * `interviewer_rules` (a learn session), interviewer-notes.md stays as it is.
+ */
+export function writeNotes(out: { coach_notes: ReviewOutput['coach_notes']; interviewer_rules?: string[] }, sessionId: string, now = new Date()): void {
   const list = (items: string[]) => (items.length ? items.slice(0, 10).map((x) => `- ${x.replace(/\s+/g, ' ').trim().slice(0, 200)}`) : ['- (none yet)']).join('\n');
   const date = now.toISOString().slice(0, 10);
   writeText(
     paths.coachNotes(),
     `# Coach notes\n\nUpdated ${date} after ${sessionId}. Read into every new interview (the gaps are probed) and every spoken debrief. You can edit this file.\n\n## Recurring gaps\n${list(out.coach_notes.recurring_gaps)}\n\n## Getting better\n${list(out.coach_notes.getting_better)}\n\n## Drill next\n${list(out.coach_notes.drill_next)}\n`,
   );
+  if (!out.interviewer_rules) return;
   writeText(
     paths.interviewerNotes(),
     `# Interviewer notes\n\nUpdated ${date} after ${sessionId}. Rules learned from the interviewer's own past mistakes, read into every new interview. You can edit this file.\n\n## Rules\n${list(out.interviewer_rules)}\n`,
@@ -220,7 +224,11 @@ export async function gradeSession(id: string, client: Pick<Anthropic, 'beta'> =
     if (!out) throw new Error('Claude returned no review');
     const { report } = saveReview(id, out, new Date(), response.model);
     writeNotes(
-      { coach_notes: { recurring_gaps: real(out.coach_notes.recurring_gaps), getting_better: real(out.coach_notes.getting_better), drill_next: real(out.coach_notes.drill_next) }, interviewer_rules: real(out.interviewer_rules) },
+      {
+        coach_notes: { recurring_gaps: real(out.coach_notes.recurring_gaps), getting_better: real(out.coach_notes.getting_better), drill_next: real(out.coach_notes.drill_next) },
+        // The tutor of a lesson is not the interviewer: its review never rewrites the interviewer's rules.
+        interviewer_rules: s.mode === 'learn' ? undefined : real(out.interviewer_rules),
+      },
       id,
     );
     return { overall: out.overall, report, bugs: out.interviewer_bugs };

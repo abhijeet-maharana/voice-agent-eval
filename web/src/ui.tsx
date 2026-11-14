@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 
 // Small shared pieces: tags, buttons, cards, sections, stats.
 
@@ -13,6 +13,24 @@ export function ago(iso: string | null | undefined): string {
 
 export const mmss = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
+/** A date you can place, then how long ago: "12 Nov, 19:30 · 2d ago". */
+export function when(iso: string | null | undefined): string {
+  if (!iso) return 'never';
+  const d = new Date(iso);
+  return `${d.toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })} · ${ago(iso)}`;
+}
+
+/** A speaker drawn as a line icon (decorative: the button text says what it does). */
+export function SpeakerIcon() {
+  return (
+    <svg className="icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M11 5 6 9H3v6h3l5 4V5z" />
+      <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+      <path d="M18.5 5.5a9 9 0 0 1 0 13" />
+    </svg>
+  );
+}
+
 export function Tag({ tone, children, title }: { tone?: 'ok' | 'bad' | 'warn' | 'dim'; children: ReactNode; title?: string }) {
   return (
     <span className={`tag ${tone || ''}`} title={title}>
@@ -21,8 +39,8 @@ export function Tag({ tone, children, title }: { tone?: 'ok' | 'bad' | 'warn' | 
   );
 }
 
-/** A button that disables itself while its async handler runs. */
-export function Btn({ onClick, children, kind, title, disabled }: { onClick: () => unknown; children: ReactNode; kind?: 'ghost' | 'green' | 'danger'; title?: string; disabled?: boolean }) {
+/** A button that disables itself while its async handler runs, showing `busyLabel` meanwhile if given. */
+export function Btn({ onClick, children, kind, title, disabled, busyLabel }: { onClick: () => unknown; children: ReactNode; kind?: 'ghost' | 'green' | 'danger'; title?: string; disabled?: boolean; busyLabel?: ReactNode }) {
   const [busy, setBusy] = useState(false);
   return (
     <button
@@ -30,6 +48,7 @@ export function Btn({ onClick, children, kind, title, disabled }: { onClick: () 
       className={`btn ${kind || ''}`}
       title={title}
       disabled={disabled || busy}
+      aria-busy={busy || undefined}
       onClick={async () => {
         setBusy(true);
         try {
@@ -39,13 +58,44 @@ export function Btn({ onClick, children, kind, title, disabled }: { onClick: () 
         }
       }}
     >
-      {children}
+      {busy && busyLabel ? busyLabel : children}
     </button>
   );
 }
 
-export function Card({ children, tone }: { children: ReactNode; tone?: 'bad' | 'warn' | 'ok' | 'accent' }) {
-  return <article className={`card ${tone || ''}`}>{children}</article>;
+/**
+ * For actions that end something (End interview): the first press arms it ("Press again to end"), a second
+ * press within 4 seconds does it. No dialog, so a live call keeps running while you decide.
+ */
+export function ConfirmButton({ onConfirm, children, confirmLabel, disabled }: { onConfirm: () => unknown; children: ReactNode; confirmLabel: ReactNode; disabled?: boolean }) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 4000);
+    return () => clearTimeout(t);
+  }, [armed]);
+  return (
+    <button
+      type="button"
+      className={`btn danger ${armed ? 'armed' : ''}`}
+      disabled={disabled}
+      onClick={() => {
+        if (!armed) return setArmed(true);
+        setArmed(false);
+        void onConfirm();
+      }}
+    >
+      <span aria-live="polite">{armed ? confirmLabel : children}</span>
+    </button>
+  );
+}
+
+export function Card({ children, tone, role }: { children: ReactNode; tone?: 'bad' | 'warn' | 'ok' | 'accent'; role?: 'alert' | 'status' }) {
+  return (
+    <article className={`card ${tone || ''}`} role={role}>
+      {children}
+    </article>
+  );
 }
 
 export function Section({ title, sub, children, actions }: { title: string; sub?: ReactNode; children: ReactNode; actions?: ReactNode }) {
@@ -63,11 +113,13 @@ export function Section({ title, sub, children, actions }: { title: string; sub?
 
 export const Empty = ({ children }: { children: ReactNode }) => <div className="empty">{children}</div>;
 
-export function Stat({ label, value, tone, hint }: { label: string; value: ReactNode; tone?: 'bad' | 'ok' | 'warn'; hint?: string }) {
+/** One measured number with its label and, under it, what good looks like (visible: tooltips don't exist on a phone). */
+export function Stat({ label, value, tone, note }: { label: string; value: ReactNode; tone?: 'bad' | 'ok' | 'warn'; note?: string }) {
   return (
-    <div className={`stat ${tone || ''}`} title={hint}>
+    <div className={`stat ${tone || ''}`}>
       <b>{value}</b>
       <span>{label}</span>
+      {note && <small>{note}</small>}
     </div>
   );
 }

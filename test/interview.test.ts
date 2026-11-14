@@ -133,8 +133,9 @@ test('start: token from the server, setup with tools, plan saved, key never sent
   assert.deepEqual(setup.tools[0].functionDeclarations.map((t: { name: string }) => t.name), ['next_question', 'reference_answer', 'candidate_background', 'job_context', 'record_note', 'related_question', 'end_interview']);
   assert.match(prompt(live), /job_context first/);
   assert.match(prompt(live), /Candidate: Sam, a senior full stack engineer\./);
-  assert.equal(setup.model, 'models/gemini-3.8-live', 'fast by default');
+  assert.equal(setup.model, 'models/gemini-3.8-live', 'the quick model by default');
   assert.ok(setup.tools[0].functionDeclarations.every((t: { behavior: string }) => t.behavior === 'BLOCKING'), 'the interview waits for every tool result');
+  assert.equal(setup.generationConfig.thinkingConfig, undefined);
   assert.ok(!JSON.stringify(live).includes('"k"'), 'the API key never goes to the browser');
   assert.ok(fs.existsSync(path.join(root, `sessions/${session.id}.json`)));
   assert.ok(session.plan.length >= 3);
@@ -142,11 +143,18 @@ test('start: token from the server, setup with tools, plan saved, key never sent
   assert.equal(again.session.id, '2026-11-11-1000-real-2', 'same minute, new id');
 });
 
-test('voice model: system design thinks by default, any round can pick', async () => {
-  const sd = await m.startSession({ round: 'system-design' }, { now: new Date('2026-11-11T11:00:00Z'), fetchImpl: okFetch });
-  assert.equal((sd.live.setup.setup as any).model, 'models/gemini-3.8-live-extended-thinking');
-  const fast = await m.startSession({ round: 'system-design', model: 'fast' }, { now: new Date('2026-11-11T11:01:00Z'), fetchImpl: okFetch });
-  assert.equal((fast.live.setup.setup as any).model, 'models/gemini-3.8-live');
+test('voice model: any round can pick extended thinking, which gets background tools and a thinking level', async () => {
+  const sd = await m.startSession({ round: 'system-design', model: 'thinking' }, { now: new Date('2026-11-11T11:00:00Z'), fetchImpl: okFetch });
+  const t = sd.live.setup.setup as any;
+  assert.equal(t.model, 'models/gemini-3.8-live-extended-thinking');
+  assert.ok(t.tools[0].functionDeclarations.every((d: { behavior: string }) => d.behavior === 'NON_BLOCKING'), 'it closes on BLOCKING tools (1007)');
+  assert.deepEqual(t.generationConfig.thinkingConfig, { thinkingLevel: 'LOW' }, 'it closes without a thinking level (1007)');
+  assert.match(prompt(sd.live), /wait silently for its result/, 'and is told to wait for each result');
+  const fast = await m.startSession({ round: 'system-design' }, { now: new Date('2026-11-11T11:01:00Z'), fetchImpl: okFetch });
+  const fastSetup = fast.live.setup.setup as any;
+  assert.equal(fastSetup.model, 'models/gemini-3.8-live', 'quick by default');
+  assert.ok(fastSetup.tools[0].functionDeclarations.every((d: { behavior: string }) => d.behavior === 'BLOCKING'), 'the quick model waits for every tool result');
+  assert.doesNotMatch(prompt(fast.live), /wait silently for its result/);
   assert.equal(m.pageOptions(NOW).models.length, 2);
 });
 
@@ -386,7 +394,7 @@ test('learn mode: the tutor gets the answer, the page shows it, recall hides it,
   assert.equal(session.mode, 'learn');
   const tools = (live.setup.setup as any).tools[0].functionDeclarations.map((t: { name: string }) => t.name);
   assert.deepEqual(tools, ['next_question', 'reference_answer', 'candidate_background', 'job_context', 'start_recall', 'record_note', 'end_interview']);
-  assert.match(prompt(live), /patient, friendly tutor/);
+  assert.match(prompt(live), /warm, patient, encouraging tutor/);
   assert.match(prompt(live), /call start_recall/);
   assert.match(live.kickoff, /Start the lesson/);
 
@@ -408,6 +416,33 @@ test('learn mode: the tutor gets the answer, the page shows it, recall hides it,
   assert.match(input, /Mode: LEARN/);
   assert.match(input, /taught, then explained back/);
   assert.match(input, /\[0:12\] next_question/);
+  assert.match(input, /return interviewer_rules exactly as the current rules/);
+
+  // A lesson's review updates the coach notes but never the interviewer's rules (those go into real interviews).
+  const rulesBefore = fs.readFileSync(path.join(root, 'interviewer-notes.md'), 'utf8');
+  const tutorReview = {
+    beta: {
+      messages: {
+        parse: async () => ({
+          stop_reason: 'end_turn',
+          model: 'claude-test',
+          parsed_output: {
+            overall: 7,
+            summary: 'Good explain-back.',
+            answers: [{ question_id: q.question_id, question: q.question, score: 7, technical: '', structure: '', delivery: '', rewrite: '', fix: '' }],
+            delivery: '',
+            next_focus: [],
+            coach_notes: { recurring_gaps: ['Explain-backs skip the example (1 lesson)'], getting_better: [], drill_next: [] },
+            interviewer_rules: ['Check in after every point.'],
+            interviewer_bugs: [],
+          },
+        }),
+      },
+    },
+  } as any;
+  await review.gradeSession(id, tutorReview);
+  assert.equal(fs.readFileSync(path.join(root, 'interviewer-notes.md'), 'utf8'), rulesBefore, 'interviewer rules untouched');
+  assert.match(fs.readFileSync(path.join(root, 'coach-notes.md'), 'utf8'), /Explain-backs skip the example/);
 
   const plain = await m.startSession({ round: 'tech' }, { now: new Date('2026-11-11T15:05:00Z'), fetchImpl: okFetch });
   assert.equal(plain.session.mode, 'interview', 'interview by default');
@@ -425,6 +460,98 @@ test('generic rounds: per round instructions reach the interviewer, review focus
   write('config.json', JSON.stringify({ candidate: { name: 'Sam', summary: 'a senior full stack engineer.' }, privateWords: ['Moonlight'], defaultMode: 'learn' }));
   const learned = await m.startSession({ round: 'screening' }, { now: new Date('2026-11-11T16:01:00Z'), fetchImpl: okFetch });
   assert.equal(learned.session.mode, 'learn');
+  assert.equal(learned.session.voice, 'Sulafat', 'learn mode gets the warm tutor voice by default');
+  assert.match(prompt(learned.live), /never sound strict/);
   assert.equal(m.pageOptions(NOW).defaultMode, 'learn');
+  write('config.json', JSON.stringify({ candidate: { name: 'Sam', summary: 'a senior full stack engineer.' }, privateWords: ['Moonlight'], accent: 'Indian' }));
+  const accented = await m.startSession({ round: 'screening' }, { now: new Date('2026-11-11T16:02:00Z'), fetchImpl: okFetch });
+  assert.match(prompt(accented.live), /natural Indian English accent/);
+  assert.match(prompt(accented.live), /Speak only English for the whole interview/);
+  write('config.json', JSON.stringify({ candidate: { name: 'Sam', summary: 'a senior full stack engineer.' }, privateWords: ['Moonlight'], accent: 'Indian', secondLanguage: 'Hindi' }));
+  const hinglish = await m.startSession({ round: 'screening', mode: 'learn' }, { now: new Date('2026-11-11T16:04:00Z'), fetchImpl: okFetch });
+  assert.match(prompt(hinglish.live), /If they speak Hindi .*\(Hinglish\).*every technical term and keyword in English/);
+  const strict = await m.startSession({ round: 'screening' }, { now: new Date('2026-11-11T16:05:00Z'), fetchImpl: okFetch });
+  assert.doesNotMatch(prompt(strict.live), /Hinglish/, 'the interview itself stays in English');
   write('config.json', JSON.stringify({ candidate: { name: 'Sam', summary: 'a senior full stack engineer.' }, privateWords: ['Moonlight'] }));
+  assert.doesNotMatch(prompt((await m.startSession({ round: 'screening' }, { now: new Date('2026-11-11T16:03:00Z'), fetchImpl: okFetch })).live), /accent/, 'no accent line by default');
+});
+
+test('turn taking: auto waits for the chosen pause, button turns detection off, bad values refused', async () => {
+  const auto = await m.startSession({ round: 'screening', turnTaking: { mode: 'auto', pauseMs: 6000 } }, { now: new Date('2026-11-11T17:00:00Z'), fetchImpl: okFetch });
+  const ac = (auto.live.setup.setup as any).realtimeInputConfig;
+  assert.deepEqual(ac.automaticActivityDetection, { disabled: false, endOfSpeechSensitivity: 'END_SENSITIVITY_LOW', silenceDurationMs: 6000 });
+  assert.match(prompt(auto.live), /A pause is not the end of an answer/);
+  assert.deepEqual(auto.session.turnTaking, { mode: 'auto', pauseMs: 6000 });
+
+  const button = await m.startSession({ round: 'screening', turnTaking: { mode: 'button' } }, { now: new Date('2026-11-11T17:01:00Z'), fetchImpl: okFetch });
+  assert.equal((button.live.setup.setup as any).realtimeInputConfig.automaticActivityDetection.disabled, true);
+  assert.match(prompt(button.live), /presses a Done button/);
+
+  const dflt = await m.startSession({ round: 'screening' }, { now: new Date('2026-11-11T17:02:00Z'), fetchImpl: okFetch });
+  assert.equal((dflt.live.setup.setup as any).realtimeInputConfig.automaticActivityDetection.silenceDurationMs, 3000, 'auto, 3 s by default');
+
+  await assert.rejects(m.startSession({ round: 'screening', turnTaking: { mode: 'push' } }, { now: NOW, fetchImpl: okFetch }), /turnTaking.mode/);
+  await assert.rejects(m.startSession({ round: 'screening', turnTaking: { mode: 'auto', pauseMs: 60_000 } }, { now: NOW, fetchImpl: okFetch }), /pauseMs/);
+  const coach = await m.startDebrief(sessionId, { fetchImpl: okFetch, turnTaking: { mode: 'button' } });
+  assert.equal((coach.setup.setup as any).realtimeInputConfig.automaticActivityDetection.disabled, true, 'the spoken review follows the same choice');
+  assert.equal((coach.setup.setup as any).tools[0].functionDeclarations[0].behavior, 'BLOCKING', 'the spoken review stays on the quick model');
+});
+
+test('question bank: every question with its answer, and calls on hand picked questions', async () => {
+  const list = m.questionList(NOW);
+  const loop = list.find((q) => q.id === 'nodejs/010-event-loop')!;
+  assert.equal(loop.question, 'Explain the Node.js event loop');
+  assert.match(loop.short, /microtasks/);
+  assert.ok(!list.some((q) => /Moonlight/.test(q.short)), 'private words never reach the page');
+  assert.match(m.questionNotes('nodejs/010-event-loop').notes, /Going Deeper/);
+  assert.throws(() => m.questionNotes('../etc/passwd'), /No such question/);
+
+  const picked = ['system-design/020-cap-theorem', 'nodejs/010-event-loop'];
+  const { session } = await m.startSession({ questions: picked, mode: 'learn' }, { now: new Date('2026-11-11T19:30:00Z'), fetchImpl: okFetch });
+  assert.deepEqual(session.plan.map((p) => p.id), picked, 'asked in the order picked');
+  assert.equal(session.picked, true);
+  assert.equal(session.round, 'tech', 'the round whose folders hold most of the picked questions (nodejs and system-design)');
+  const one = await m.startSession({ questions: ['nodejs/010-event-loop'], round: 'screening' }, { now: new Date('2026-11-11T19:31:00Z'), fetchImpl: okFetch });
+  assert.equal(one.session.round, 'screening', 'a round sent with the questions wins');
+  assert.equal(one.session.plan.length, 1);
+
+  await assert.rejects(m.startSession({ questions: ['nodejs/nope'] }, { now: NOW, fetchImpl: okFetch }), /Unknown question/);
+  await assert.rejects(m.startSession({ questions: [] }, { now: NOW, fetchImpl: okFetch }), /1 to 10/);
+  await assert.rejects(m.startSession({ questions: Array.from({ length: 11 }, () => 'nodejs/010-event-loop') }, { now: NOW, fetchImpl: okFetch }), /1 to 10/);
+});
+
+test('delete: the session and its report go, and progress is rebuilt without it', async () => {
+  const { session } = await m.startSession({ round: 'screening' }, { now: new Date('2026-11-11T18:00:00Z'), fetchImpl: okFetch });
+  const id = session.id;
+  m.runTool(id, 'next_question', {});
+  m.endSession(id, { transcript: [{ who: 'candidate', text: 'An answer.', start: 0, end: 5 }], durationSeconds: 30 });
+  const qid = session.plan[0].id;
+  const before = bank.readProgress()[qid]?.asked ?? 0;
+  m.saveReview(id, { overall: 3, summary: 's', answers: [{ question_id: qid, question: 'q', score: 3, technical: '', structure: '', delivery: '', rewrite: '', fix: '' }], delivery: '', next_focus: [] }, new Date('2026-11-11T18:30:00Z'));
+  assert.equal(bank.readProgress()[qid].asked, before + 1);
+  assert.ok(fs.existsSync(path.join(root, 'reports', `${id}.md`)));
+
+  const r = m.deleteSession(id);
+  assert.equal(r.deleted, id);
+  assert.ok(!fs.existsSync(path.join(root, 'sessions', `${id}.json`)));
+  assert.ok(!fs.existsSync(path.join(root, 'reports', `${id}.md`)));
+  assert.equal(bank.readProgress()[qid]?.asked ?? 0, before, 'its answers no longer count');
+  assert.ok(m.loadSession(sessionId).review, 'other sessions stay');
+  assert.ok(bank.readProgress()[m.loadSession(sessionId).review!.answers[0].question_id], 'and keep their progress');
+  assert.throws(() => m.deleteSession(id), /No session/);
+  assert.throws(() => m.deleteSession('../../etc/passwd'), /bad session id/);
+});
+
+test('restart: a grading flag left by a restart becomes an error the page can retry', async () => {
+  const { session } = await m.startSession({ round: 'screening' }, { now: new Date('2026-11-11T19:00:00Z'), fetchImpl: okFetch });
+  m.endSession(session.id, { transcript: [{ who: 'candidate', text: 'An answer.', start: 0, end: 5 }], durationSeconds: 30 });
+  const s = m.loadSession(session.id);
+  s.grading = { startedAt: '2026-11-11T19:01:00Z' };
+  m.saveSession(s);
+  assert.deepEqual(m.recoverGrading(15 * 60_000, new Date('2026-11-11T19:05:00Z')), [], 'a recent one may still be running');
+  assert.deepEqual(m.recoverGrading(), [session.id]);
+  const after = m.loadSession(session.id);
+  assert.equal(after.grading, undefined);
+  assert.match(after.reviewError!, /interrupted/);
+  assert.equal(after.status, 'ended', 'still gradable');
 });

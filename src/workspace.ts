@@ -107,6 +107,8 @@ export function writeText(file: string, text: string): void {
 interface ConfigFile {
   candidate: { name?: string; summary?: string };
   language: string;
+  accent: string;
+  secondLanguage: string;
   privateWords: string[];
   rounds: Round[];
   personas: Record<string, Persona>;
@@ -125,6 +127,13 @@ export interface Config {
   };
   /** The language the interview stays in. */
   language: string;
+  /** Optional: how the voice should sound, e.g. "Indian" (Gemini Live voices take their accent from the prompt). */
+  accent?: string;
+  /**
+   * Optional, e.g. "Hindi": if you speak it, the tutor and the coach answer in a light mix (Hinglish: technical
+   * terms in the main language, a few simple words in this one). The interview itself stays in `language`.
+   */
+  secondLanguage?: string;
   /**
    * Lines of your profile and prep packs that contain any of these words (any case) never reach the
    * interviewer or the reviewer: a side project, a client name, anything you don't want raised.
@@ -163,12 +172,16 @@ export const DEFAULT_PERSONAS: Record<string, Persona> = {
   },
 };
 
-/** Rounds for the folders in examples/workspace/questions. Your config.json can replace the whole list. */
+/**
+ * Rounds for the folders in examples/workspace/questions. Your config.json can replace the whole list. Every
+ * round uses the quick model: on 2026-11-14 extended thinking never made a tool call (it says "a system error
+ * occurred"; Google forum thread 185649). `npm run smoke:live thinking` checks whether it works again.
+ */
 export const DEFAULT_ROUNDS: Round[] = [
   { id: 'screening', label: 'Recruiter screen', about: 'Intro, motivation, remote work, notice period, pay.', mix: { screening: 5 }, minutes: 15, followUps: 2, persona: 'recruiter', model: 'fast', job: 'optional' },
   { id: 'behavioral', label: 'Behavioral (STAR)', about: 'Teamwork, conflict, ownership, incidents.', mix: { behavioral: 4 }, minutes: 20, followUps: 2, persona: 'manager', model: 'fast', job: 'optional' },
   { id: 'tech', label: 'Tech deep dive', about: 'Core concepts with follow ups.', mix: { nodejs: 2, typescript: 1, react: 2 }, minutes: 25, followUps: 2, persona: 'cto', model: 'fast', job: 'optional', topicPick: true },
-  { id: 'system-design', label: 'System design (spoken)', about: 'One design end to end: requirements, API, data, scale, trade-offs.', mix: { 'system-design': 1 }, minutes: 35, followUps: 6, persona: 'bigtech', model: 'thinking', job: 'none', only: 'design-' },
+  { id: 'system-design', label: 'System design (spoken)', about: 'One design end to end: requirements, API, data, scale, trade-offs.', mix: { 'system-design': 1 }, minutes: 35, followUps: 6, persona: 'bigtech', model: 'fast', job: 'none', only: 'design-' },
   { id: 'ai', label: 'AI engineering', about: 'AI tools at work, RAG, agents, evals.', mix: { ai: 4 }, minutes: 20, followUps: 2, persona: 'cto', model: 'fast', job: 'optional' },
   { id: 'real', label: 'Real interview', about: 'Built from a prep pack: the company, the role and its stack.', mix: { screening: 1, behavioral: 2, nodejs: 1, react: 1, 'system-design': 1 }, minutes: 30, followUps: 2, persona: 'cto', model: 'fast', job: 'required' },
   {
@@ -232,6 +245,8 @@ export function loadConfig(): Config {
       summary: raw.candidate?.summary?.trim() || 'a software engineer practising for job interviews.',
     },
     language: raw.language?.trim() || 'English',
+    accent: typeof raw.accent === 'string' && raw.accent.trim() ? raw.accent.trim() : undefined,
+    secondLanguage: typeof raw.secondLanguage === 'string' && raw.secondLanguage.trim() ? raw.secondLanguage.trim() : undefined,
     privateWords: strings(raw.privateWords).map((w) => w.toLowerCase()),
     rounds,
     personas,

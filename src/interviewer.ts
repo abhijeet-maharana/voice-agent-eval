@@ -14,7 +14,7 @@ export function liveModels(): Record<LiveModelId, { label: string; model: string
   return {
     fast: { label: 'Gemini Live: quick replies, like a real call', model: process.env.GEMINI_LIVE_MODEL || 'gemini-3.8-live' },
     thinking: {
-      label: 'Gemini Live extended thinking: sharper follow ups, longer pauses',
+      label: 'Gemini Live extended thinking: sharper follow ups, longer pauses (check it with npm run smoke:live thinking)',
       model: process.env.GEMINI_LIVE_THINKING_MODEL || 'gemini-3.8-live-extended-thinking',
     },
   };
@@ -23,6 +23,8 @@ export function liveModels(): Record<LiveModelId, { label: string; model: string
 export function liveConfig() {
   return {
     voice: process.env.GEMINI_LIVE_VOICE || 'Kore',
+    /** Learn mode: a warm voice, not the firm interviewer one. */
+    tutorVoice: process.env.GEMINI_LIVE_TUTOR_VOICE || 'Sulafat',
     wsUrl:
       process.env.GEMINI_LIVE_WS_URL ||
       'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained',
@@ -183,7 +185,7 @@ export function systemInstruction(s: Session, round: Round, config: Config): str
     '- After a main question and its follow ups, call record_note once. Never say ratings or feedback out loud.',
     '- Do not teach, correct the candidate, or reveal what a good answer is. If they say "hint", give one short nudge. If they say "skip", move on. If they say "repeat", repeat the question.',
     '- Speak like a real person on a call: short sentences, at most two sentences before a question, no lists, no markdown.',
-    `- Keep the interview in ${config.language}, even if the candidate switches language.`,
+    ...languageRules(config, 'interview'),
     '- When next_question returns done, or time is nearly up, close politely in one or two sentences, then call end_interview.',
   ];
   if (round.instructions) lines.push('', `For this round: ${round.instructions}`);
@@ -200,7 +202,7 @@ export function systemInstruction(s: Session, round: Round, config: Config): str
 /** The tutor of learn mode: teach each answer, take doubts, then have the candidate explain it back. */
 export function learnInstruction(s: Session, round: Round, config: Config): string {
   const lines = [
-    'You are a patient, friendly tutor on a voice call, helping a candidate prepare for job interviews. This is a learning session, not an interview: you teach first, then they practise.',
+    'You are a warm, patient, encouraging tutor on a voice call, helping a candidate prepare for job interviews. This is a learning session, not an interview: you teach first, then they practise. They should feel relaxed and safe to ask anything.',
     `Candidate: ${candidateLine(config)}`,
     `Topic: ${round.label}. ${round.about} About ${round.minutes} minutes, ${s.plan.length} question${s.plan.length === 1 ? '' : 's'}.`,
     ...(round.instructions ? [`For this topic: ${round.instructions}`] : []),
@@ -214,9 +216,12 @@ export function learnInstruction(s: Session, round: Round, config: Config): stri
     '6. Call record_note with how well they explained it back, then move on with next_question.',
     '',
     'How to speak:',
-    '- Like a good teacher on a call: short sentences, simple words, no lists, no markdown, never read long text word for word.',
+    '- Like a kind teacher talking to a friend: warm, encouraging, smiling in your voice. Greet them by name, praise effort, and never sound strict, rushed or like an examiner.',
+    '- Speak slowly and clearly, one idea at a time. Short sentences, everyday words, no lists, no markdown, never read long text word for word.',
+    '- When you use a technical term, explain it in plain words right away, with an everyday comparison if it helps.',
+    '- If they seem confused, or say they did not understand, do not repeat the same words: say it again more simply, with a small example. Ask "Is that clearer?"',
     '- They can say "explain again", "slower", "example", "skip", "next" or "stop" at any time; follow it.',
-    `- Keep the lesson in ${config.language}, even if they switch language.`,
+    ...languageRules(config, 'lesson'),
     '- When next_question returns done, or time is nearly up, close warmly in one or two sentences, then call end_interview.',
   ];
   const gaps = notesSection('coach', ['recurring gaps', 'drill next']);
@@ -238,7 +243,8 @@ export function debriefInstruction(s: Session, config: Config): string {
     `You are an interview coach on a voice call with ${config.candidate.name ?? 'the candidate'}. They just finished a mock interview, and a senior reviewer scored it. Your job is to talk them through that review so they do not have to read it.`,
     '',
     'How to speak:',
-    `- Simple ${config.language}, short sentences, warm but honest, like a good mentor. No lists, no markdown, no reading out headings.`,
+    '- Simple words, short sentences, warm but honest, like a good mentor. No lists, no markdown, no reading out headings.',
+    ...languageRules(config, 'debrief'),
     '- Use only what is in the review below. Never invent scores, facts or examples.',
     '- They can interrupt any time. Follow what they say: "next", "repeat", "slower", "skip to the end", "why", or "stop".',
     '',
@@ -280,6 +286,26 @@ export function pickTurnTaking(v: unknown): TurnTaking {
   return { mode: t.mode, pauseMs: Math.round(pauseMs) };
 }
 
+/**
+ * Which language to speak, and how it should sound (config.json `language`, `accent`, `secondLanguage`).
+ * Live voices have no accent or language lock, so the prompt sets both, firmly: the model otherwise
+ * follows the candidate into another language. The interview stays in the main language, like a real one;
+ * the tutor and the coach may answer a second language in a light mix (Hinglish for Hindi).
+ */
+function languageRules(config: Config, call: 'interview' | 'lesson' | 'debrief'): string[] {
+  const lang = config.language;
+  const second = config.secondLanguage;
+  const rules =
+    call === 'interview' || !second
+      ? [`- Speak only ${lang} for the whole ${call}. If the candidate speaks another language, still answer in ${lang}.`]
+      : [
+          `- Speak ${lang} by default.`,
+          `- If they speak ${second} (or mix it in), answer in a light mix the way bilingual colleagues talk${/^hindi$/i.test(second) ? ' (Hinglish)' : ''}: mostly ${lang}, every technical term and keyword in ${lang}, and only a few simple ${second} words or phrases to make it easier to follow. Never switch fully to ${second}. Go back to plain ${lang} as soon as they do.`,
+        ];
+  if (config.accent) rules.push(`- Always speak with a natural ${config.accent} ${lang} accent and pronunciation, in every sentence, clear and at a relaxed pace, like a professional on a work call.`);
+  return rules;
+}
+
 /** The same rule for every voice: thinking pauses are normal. */
 function turnRule(t: TurnTaking): string {
   return t.mode === 'button'
@@ -294,20 +320,40 @@ function realtimeInputConfig(t: TurnTaking) {
     : { automaticActivityDetection: { disabled: false, endOfSpeechSensitivity: 'END_SENSITIVITY_LOW', silenceDurationMs: t.pauseMs } };
 }
 
-/** A Gemini Live setup (BidiGenerateContentSetup): audio out in the given voice, both sides transcribed, the given tools. */
-export function liveSetup(model: string, instruction: string, tools: readonly object[], voice: string, turnTaking: TurnTaking = DEFAULT_TURN_TAKING) {
+/**
+ * The extended thinking model runs tools only in the background: it rejects BLOCKING tools (close code 1007)
+ * and says a short filler while a tool runs. This rule keeps it from guessing before the result arrives.
+ */
+/** How hard extended thinking thinks before each reply: low (shortest pauses, the default), medium or high. */
+export const thinkingLevel = () => {
+  const v = (process.env.GEMINI_LIVE_THINKING_LEVEL || 'low').toUpperCase();
+  return ['LOW', 'MEDIUM', 'HIGH'].includes(v) ? v : 'LOW';
+};
+
+const ASYNC_TOOLS_RULE =
+  'Your tools run in the background while you talk. After you call a tool, say at most one short filler line (for example "Okay, one moment.") and then wait silently for its result. Never invent or guess a question, an answer or any tool result before it arrives, and never read a question until next_question has returned it.';
+
+/**
+ * A Gemini Live setup (BidiGenerateContentSetup): audio out in the given voice, both sides transcribed, the
+ * given tools. `thinking`: the extended thinking model, which needs a thinking level and supports only
+ * background (NON_BLOCKING) tools; both are refused with close code 1007 otherwise.
+ */
+export function liveSetup(model: string, instruction: string, tools: readonly object[], voice: string, turnTaking: TurnTaking = DEFAULT_TURN_TAKING, opts: { thinking?: boolean } = {}) {
+  const rules = [instruction, turnRule(turnTaking), ...(opts.thinking ? [ASYNC_TOOLS_RULE] : [])];
   return {
     setup: {
       model: model.startsWith('models/') ? model : `models/${model}`,
       generationConfig: {
         responseModalities: ['AUDIO'],
         speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } },
+        ...(opts.thinking ? { thinkingConfig: { thinkingLevel: thinkingLevel() } } : {}),
       },
-      systemInstruction: { parts: [{ text: `${instruction}\n\n${turnRule(turnTaking)}` }] },
+      systemInstruction: { parts: [{ text: rules.join('\n\n') }] },
       realtimeInputConfig: realtimeInputConfig(turnTaking),
-      // Live models may run function calls in the background by default (NON_BLOCKING); the interview
-      // waits for each result (the next question, the reference answer), so every tool is BLOCKING.
-      tools: [{ functionDeclarations: tools.map((t) => ({ ...t, behavior: 'BLOCKING' })) }],
+      // The quick model would run tools in the background by default; the interview waits for each result
+      // (the next question, the reference answer), so its tools are BLOCKING. Extended thinking supports
+      // only NON_BLOCKING and closes the connection on BLOCKING (1007).
+      tools: [{ functionDeclarations: tools.map((t) => ({ ...t, behavior: opts.thinking ? 'NON_BLOCKING' : 'BLOCKING' })) }],
       inputAudioTranscription: {},
       outputAudioTranscription: {},
       // Without compression an audio session ends after 15 minutes.

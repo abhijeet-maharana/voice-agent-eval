@@ -18,6 +18,7 @@
     "dev:web": "vite --config web/vite.config.ts",
     "build": "vite build --config web/vite.config.ts",
     "review": "tsx scripts/review.ts",
+    "smoke:live": "tsx scripts/live-smoke.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p web",
     "test": "tsx --test test/*.test.ts",
     "check": "npm run -s typecheck && npm test"

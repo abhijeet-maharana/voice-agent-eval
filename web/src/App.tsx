@@ -1,7 +1,7 @@
 import { Component, useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
-import { ApiError, beacon, get, post } from './api';
-import { LiveInterview, type FunctionCall, type LiveState } from './live';
-import { Btn, Card, Empty, Section, Stat, Tag, ago, mmss, scoreTone } from './ui';
+import { ApiError, beacon, del, get, post } from './api';
+import { LiveInterview, type FunctionCall, type LiveState, type Turn as TurnState } from './live';
+import { Btn, Card, ConfirmButton, Empty, Section, SpeakerIcon, Stat, Tag, mmss, scoreTone, when } from './ui';
 
 // The whole app: pick a round (Setup), talk to the interviewer (Live), read and hear the review (Done).
 // Every tool the interviewer calls is shown with its arguments and result.
@@ -34,6 +34,10 @@ interface SessionSummary {
   durationSeconds?: number;
   overall?: number;
   debriefs?: number;
+  mode?: 'interview' | 'learn';
+  picked?: boolean;
+  grading?: boolean;
+  gradingFailed?: boolean;
 }
 
 interface Options {
@@ -44,12 +48,14 @@ interface Options {
   models: { id: string; label: string; model: string }[];
   voices: { id: string; style: string }[];
   defaultVoice: string;
+  defaultTutorVoice: string;
   defaultMode: 'interview' | 'learn';
   rounds: RoundInfo[];
   personas: { id: string; label: string }[];
   topics: string[];
   prepPacks: { file: string; title: string }[];
   dueCount: number;
+  maxPicked: number;
   sessions: SessionSummary[];
 }
 
@@ -83,7 +89,9 @@ interface Session {
   round: string;
   persona: string;
   mode?: 'interview' | 'learn';
+  turnTaking?: TurnTaking;
   model?: string;
+  createdAt: string;
   status: 'live' | 'ended' | 'reviewed';
   plan: { id: string; question: string; asked: boolean; added?: boolean }[];
   toolCalls: ToolCallRecord[];
@@ -118,7 +126,110 @@ interface ShownCall {
 }
 
 type LiveStart = { wsUrl: string; token: string; setup: { setup: Record<string, unknown> }; kickoff?: string };
+
+/** How the voice knows you finished: after a pause, or when you press Done. Remembered per browser. */
+type TurnTaking = { mode: 'auto' | 'button'; pauseMs: number };
+const TURN_CHOICES: { key: string; label: string; short: string; value: TurnTaking }[] = [
+  { key: 'auto-1500', label: 'Auto: replies after a 1.5 s pause (quick)', short: 'replies after 1.5 s', value: { mode: 'auto', pauseMs: 1500 } },
+  { key: 'auto-3000', label: 'Auto: replies after a 3 s pause', short: 'replies after 3 s', value: { mode: 'auto', pauseMs: 3000 } },
+  { key: 'auto-6000', label: 'Auto: replies after a 6 s pause (lots of thinking time)', short: 'replies after 6 s', value: { mode: 'auto', pauseMs: 6000 } },
+  { key: 'button', label: 'Button: waits until you press Done (or Space)', short: 'waits for Done', value: { mode: 'button', pauseMs: 3000 } },
+];
+/** Button by default: a pause to think never ends your answer. */
+const DEFAULT_TURN = 'button';
+const turnChoice = (key: string) => TURN_CHOICES.find((c) => c.key === key) ?? TURN_CHOICES.find((c) => c.key === DEFAULT_TURN)!;
+
+/** Space = Done / interrupt (button mode), P = pause or resume. Ignored while typing in a field. */
+function useCallKeys(onSpace: () => void, onP: () => void) {
+  const handlers = useRef({ onSpace, onP });
+  handlers.current = { onSpace, onP };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;
+      if (e.code === 'Space') {
+        e.preventDefault();
+        handlers.current.onSpace();
+      } else if (e.key === 'p' || e.key === 'P') handlers.current.onP();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+}
+
+/** Done / Interrupt (button mode) and Pause, shared by the interview and the spoken review. */
+function CallControls({ li, turnMode, turn, state, paused, onPause }: { li: LiveInterview | null; turnMode: 'auto' | 'button'; turn: TurnState; state: LiveState; paused: boolean; onPause: () => void }) {
+  useCallKeys(
+    () => {
+      if (turnMode !== 'button' || paused) return;
+      if (turn === 'yours') li?.done();
+      else if (state === 'speaking') li?.interrupt();
+    },
+    onPause,
+  );
+  return (
+    <>
+      {turnMode === 'button' &&
+        (turn === 'yours' ? (
+          <button type="button" className="btn green big" onClick={() => li?.done()} disabled={paused}>
+            Done answering <kbd>Space</kbd>
+          </button>
+        ) : state === 'speaking' ? (
+          <button type="button" className="btn ghost" onClick={() => li?.interrupt()} disabled={paused}>
+            Interrupt <kbd>Space</kbd>
+          </button>
+        ) : (
+          <button type="button" className="btn ghost" disabled>
+            {turn === 'waiting' ? 'Thinking…' : 'Wait for the question…'}
+          </button>
+        ))}
+      <button type="button" className="btn ghost" onClick={onPause}>
+        {paused ? 'Resume' : 'Pause'} <kbd>P</kbd>
+      </button>
+    </>
+  );
+}
+
+/** Covers the screen while paused, so whoever walked in sees nothing. Everything behind it is inert (no focus, no clicks). */
+function PausedCover({ onResume }: { onResume: () => void }) {
+  useEffect(() => {
+    const behind = [...(document.querySelector('main')?.children ?? [])].filter((el): el is HTMLElement => el instanceof HTMLElement && !el.classList.contains('paused-cover'));
+    behind.forEach((el) => (el.inert = true));
+    return () => behind.forEach((el) => (el.inert = false));
+  }, []);
+  return (
+    <div className="paused-cover" role="dialog" aria-modal="true" aria-label="Paused">
+      <div>
+        <h2>Paused</h2>
+        <p className="dim">Your mic is off and the voice is frozen. It carries on from the same word.</p>
+        <button type="button" className="btn green big" onClick={onResume} autoFocus>
+          Resume <kbd>P</kbd>
+        </button>
+      </div>
+    </div>
+  );
+}
 type StartResult = { session: Session; live: LiveStart };
+
+/** An error in plain words, with what to do; the raw message stays underneath for debugging. */
+function friendlyError(msg: string): { text: string; detail?: string } {
+  if (/Gemini token request failed \((400|401|403)\)/.test(msg)) return { text: 'Gemini refused the API key. Check GEMINI_API_KEY in .env, then restart the server.', detail: msg };
+  if (/Gemini token request failed/.test(msg)) return { text: 'Could not open a Gemini session just now. Try again in a minute.', detail: msg };
+  if (/Permission denied|NotAllowedError|not allowed by the user/i.test(msg)) return { text: 'The browser blocked the microphone. Allow it from the icon in the address bar, then start again.', detail: msg };
+  if (/Claude API error (429|5\d\d)|overloaded/i.test(msg)) return { text: 'Claude is busy right now. Nothing is lost: try again in a few minutes.', detail: msg };
+  return { text: msg };
+}
+
+function ErrorBar({ message, children }: { message: string; children?: ReactNode }) {
+  const e = friendlyError(message);
+  return (
+    <div className="nowbar bad" role="alert">
+      <Tag tone="bad">Error</Tag> <span>{e.text}</span>
+      {e.detail && <span className="dim small">{e.detail}</span>}
+      {children}
+    </div>
+  );
+}
 
 /** Remembered per browser (a convenience only: storage can be blocked, so every access is guarded). */
 const remembered = (key: string) => {
@@ -176,11 +287,40 @@ let pendingLive: { li: LiveInterview; started: StartResult } | null = null;
 /** Handed from the Listen click to the debrief view. */
 let pendingDebrief: { li: LiveInterview; live: LiveStart } | null = null;
 
+/** A handed over call, held by the view that runs it. */
+type Handoff<T> = { value: T; stopTimer?: ReturnType<typeof setTimeout> };
+
+/**
+ * Takes the handed over call into `ref` on the first run of a view's effect; returns true on that first run.
+ * React's StrictMode (npm run dev:web) runs an effect, its cleanup, then the effect again on the same mount,
+ * keeping refs. So the cleanup only schedules the hang up (`stopTimer`), and a second run cancels it and keeps
+ * the same call instead of finding the handoff empty.
+ */
+function takeHandoff<T>(ref: { current: Handoff<T> | null }, take: () => T | null): boolean {
+  if (ref.current) {
+    clearTimeout(ref.current.stopTimer);
+    ref.current.stopTimer = undefined;
+    return false;
+  }
+  const value = take();
+  if (value) ref.current = { value };
+  return !!value;
+}
+
 export default function App() {
   const [opts, setOpts] = useState<Options | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [unlock, setUnlock] = useState<string | null>(null);
-  const [view, setView] = useState<{ kind: 'setup' } | { kind: 'live'; session: Session } | { kind: 'done'; id: string }>({ kind: 'setup' });
+  const [view, setViewState] = useState<{ kind: 'setup' } | { kind: 'bank' } | { kind: 'live'; session: Session } | { kind: 'done'; id: string }>({ kind: 'setup' });
+  // Opening a past session or going back to the form starts clean. A call that ends keeps its error on
+  // the review screen, so you can still see why it stopped.
+  const setView = (v: typeof view) => {
+    if (v.kind === 'setup' || view.kind === 'setup') {
+      setError(null);
+      setUnlock(null);
+    }
+    setViewState(v);
+  };
 
   const load = () => get<Options>('api/options').then(setOpts, (e) => setError(e.message));
   useEffect(() => {
@@ -189,24 +329,36 @@ export default function App() {
 
   const micOk = window.isSecureContext && !!navigator.mediaDevices;
 
+  /** Start (the form) or Interview / Learn (the question bank): audio is set up inside the click. */
+  const startCall = async (input: Record<string, unknown>) => {
+    setError(null);
+    const li = new LiveInterview();
+    try {
+      await li.prepareAudio();
+      const r = await post<StartResult>('api/sessions', input);
+      pendingLive = { li, started: r };
+      setView({ kind: 'live', session: r.session });
+    } catch (e) {
+      li.stop();
+      setError((e as Error).message);
+      setUnlock(e instanceof ApiError ? (e.unlock ?? null) : null);
+      window.scrollTo(0, 0);
+    }
+  };
+
   return (
     <main className="main">
       <header className="page-head">
         <div>
           <h1>Voice Interviewer</h1>
-          <p className="sub">A live voice interviewer built from your own questions, profile and prep packs. Every tool it calls shows on screen. Claude scores the call afterwards.</p>
+          {view.kind === 'setup' && <p className="sub">Practise interviews out loud with a live voice built from your own questions, profile and prep packs. Claude scores every answer afterwards.</p>}
         </div>
       </header>
       {!opts ? (
         <div className="loading">{error ? `Could not reach the server: ${error}` : 'Loading…'}</div>
       ) : (
         <>
-          {error && (
-            <div className="nowbar">
-              <Tag tone="bad">Error</Tag> {error}
-              {unlock && <a href={unlock}>Sign in</a>}
-            </div>
-          )}
+          {error && <ErrorBar message={error}>{unlock && <a href={unlock}>Sign in</a>}</ErrorBar>}
           {!opts.workspaceReady && (
             <div className="nowbar">
               <Tag tone="warn">No questions</Tag> There is no workspace yet. Run <code>npm run setup</code> to copy the examples, then reload.
@@ -223,26 +375,9 @@ export default function App() {
             </div>
           )}
           {view.kind === 'setup' && (
-            <Setup
-              opts={opts}
-              canStart={opts.configured && opts.workspaceReady && micOk}
-              onStart={async (input) => {
-                setError(null);
-                const li = new LiveInterview();
-                try {
-                  await li.prepareAudio();
-                  const r = await post<StartResult>('api/sessions', input);
-                  pendingLive = { li, started: r };
-                  setView({ kind: 'live', session: r.session });
-                } catch (e) {
-                  li.stop();
-                  setError((e as Error).message);
-                  setUnlock(e instanceof ApiError ? (e.unlock ?? null) : null);
-                }
-              }}
-              onOpen={(id) => setView({ kind: 'done', id })}
-            />
+            <Setup opts={opts} micOk={micOk} onStart={startCall} onBrowse={() => setView({ kind: 'bank' })} onOpen={(id) => setView({ kind: 'done', id })} onDeleted={() => void load()} />
           )}
+          {view.kind === 'bank' && <QuestionBank opts={opts} micOk={micOk} onStart={startCall} onBack={() => setView({ kind: 'setup' })} />}
           {view.kind === 'live' && (
             <LiveGuard sessionId={view.session.id}>
               <Live key={view.session.id} session={view.session} onError={(e) => setError((e as Error).message)} onDone={(id) => setView({ kind: 'done', id })} />
@@ -264,13 +399,13 @@ export default function App() {
   );
 }
 
-function VoiceSelect({ label, value, onChange, opts }: { label: string; value: string; onChange: (v: string) => void; opts: Options }) {
+function VoiceSelect({ label, value, onChange, opts, dflt = opts.defaultVoice }: { label: string; value: string; onChange: (v: string) => void; opts: Options; dflt?: string }) {
   return (
     <label className="field">
       <span className="field-label">{label}</span>
       <select className="input" value={value} onChange={(e) => onChange(e.target.value)}>
         <option value="">
-          Default ({opts.defaultVoice}, {opts.voices.find((v) => v.id === opts.defaultVoice)?.style.toLowerCase()})
+          Default ({dflt}, {opts.voices.find((v) => v.id === dflt)?.style.toLowerCase()})
         </option>
         {opts.voices.map((v) => (
           <option key={v.id} value={v.id}>
@@ -282,33 +417,87 @@ function VoiceSelect({ label, value, onChange, opts }: { label: string; value: s
   );
 }
 
-function Setup({ opts, canStart, onStart, onOpen }: { opts: Options; canStart: boolean; onStart: (input: Record<string, string>) => Promise<void>; onOpen: (id: string) => void }) {
-  const [round, setRound] = useState(opts.rounds[0]?.id ?? '');
+const MODES: { id: 'interview' | 'learn'; label: string; sub: string }[] = [
+  { id: 'interview', label: 'Interview', sub: 'A real call, no help' },
+  { id: 'learn', label: 'Learn', sub: 'See the answer, ask doubts, explain it back' },
+];
+
+/** A choice remembered per browser, used only while it is still one of the options. */
+function useRemembered<T extends string>(key: string, valid: (v: string) => boolean, fallback: T): [T, (v: T) => void] {
+  const [value, setValue] = useState<T>(() => {
+    const v = remembered(key);
+    return (valid(v) ? v : fallback) as T;
+  });
+  return [
+    value,
+    (v: T) => {
+      setValue(v);
+      remember(key, v);
+    },
+  ];
+}
+
+function Setup({ opts, micOk, onStart, onBrowse, onOpen, onDeleted }: { opts: Options; micOk: boolean; onStart: (input: Record<string, unknown>) => Promise<void>; onBrowse: () => void; onOpen: (id: string) => void; onDeleted: () => void }) {
+  const [round, setRound] = useRemembered<string>('vi.round', (v) => opts.rounds.some((x) => x.id === v), opts.rounds[0]?.id ?? '');
+  const [mode, setMode] = useRemembered<'interview' | 'learn'>('vi.mode', (v) => v === 'interview' || v === 'learn', opts.defaultMode);
+  const [turnKey, setTurnKey] = useRemembered<string>('vi.turn', (v) => TURN_CHOICES.some((c) => c.key === v), DEFAULT_TURN);
+  const [voice, setVoice] = useRemembered<string>('vi.voice', (v) => opts.voices.some((x) => x.id === v), '');
   const r = opts.rounds.find((x) => x.id === round) ?? opts.rounds[0];
   const [persona, setPersona] = useState('');
   const [topic, setTopic] = useState('');
   const [prepPack, setPrepPack] = useState('');
   const [model, setModel] = useState('');
-  const [mode, setMode] = useState<'interview' | 'learn'>(opts.defaultMode);
-  const [voice, setVoiceState] = useState(() => remembered('vi.voice'));
-  const setVoice = (v: string) => {
-    setVoiceState(v);
-    remember('vi.voice', v);
-  };
   const needsPack = r?.job === 'required';
+  const learn = mode === 'learn';
+
+  // Why Start is off, said next to it instead of a silently grey button.
+  const blocked = !opts.configured
+    ? 'Set GEMINI_API_KEY in .env and restart the server to start a call.'
+    : !opts.workspaceReady
+      ? 'Add a question bank first (see the note above).'
+      : !micOk
+        ? 'The microphone needs localhost or HTTPS.'
+        : !r
+          ? 'No rounds are set up in config.json.'
+          : needsPack && !prepPack
+            ? 'Pick a company prep pack to start this round.'
+            : null;
+  const settingsSummary = [
+    opts.personas.find((p) => p.id === (persona || r?.persona))?.label,
+    `voice ${voice || (learn ? opts.defaultTutorVoice : opts.defaultVoice)}`,
+    turnChoice(turnKey).short,
+    (model || r?.model) === 'thinking' ? 'extended thinking' : 'quick replies',
+  ]
+    .filter(Boolean)
+    .join(' · ');
 
   return (
     <>
-      <Section title="Start a round" sub={`${opts.questionCount} questions in your bank · ${opts.dueCount ? `${opts.dueCount} due for repeat` : 'no repeats due'}`}>
+      <Section
+        title="Start a round"
+        sub={`${opts.questionCount} questions in your bank · ${opts.dueCount ? `${opts.dueCount} due for repeat` : 'no repeats due'}`}
+        actions={
+          opts.workspaceReady && (
+            <button type="button" className="btn ghost" onClick={onBrowse}>
+              Browse questions and answers
+            </button>
+          )
+        }
+      >
         <Card>
+          <fieldset className="seg">
+            <legend className="field-label">Mode</legend>
+            <div className="seg-opts">
+              {MODES.map((m) => (
+                <label key={m.id} className={`seg-opt ${mode === m.id ? 'on' : ''}`}>
+                  <input type="radio" name="mode" value={m.id} checked={mode === m.id} onChange={() => setMode(m.id)} />
+                  <b>{m.label}</b>
+                  <span>{m.sub}</span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
           <div className="form-grid">
-            <label className="field">
-              <span className="field-label">Mode</span>
-              <select className="input" value={mode} onChange={(e) => setMode(e.target.value as 'interview' | 'learn')}>
-                <option value="interview">Interview: a real call, no help</option>
-                <option value="learn">Learn: see the answer, ask doubts, then explain it back</option>
-              </select>
-            </label>
             <label className="field">
               <span className="field-label">Round</span>
               <select className="input" value={round} onChange={(e) => setRound(e.target.value)}>
@@ -319,29 +508,6 @@ function Setup({ opts, canStart, onStart, onOpen }: { opts: Options; canStart: b
                 ))}
               </select>
             </label>
-            <label className="field">
-              <span className="field-label">Interviewer</span>
-              <select className="input" value={persona} onChange={(e) => setPersona(e.target.value)}>
-                <option value="">Default for this round ({opts.personas.find((p) => p.id === r?.persona)?.label})</option>
-                {opts.personas.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span className="field-label">Model</span>
-              <select className="input" value={model} onChange={(e) => setModel(e.target.value)}>
-                <option value="">Default for this round ({opts.models.find((m) => m.id === r?.model)?.label.split(':')[0]})</option>
-                {opts.models.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <VoiceSelect label="Interviewer voice" value={voice} onChange={setVoice} opts={opts} />
             {r?.topicPick && (
               <label className="field">
                 <span className="field-label">Topic</span>
@@ -368,60 +534,323 @@ function Setup({ opts, canStart, onStart, onOpen }: { opts: Options; canStart: b
                 </select>
               </label>
             )}
-            <p className="hint wide">
-              {r?.about} {r?.questions} {mode === 'learn' ? 'question' : 'main question'}{r?.questions === 1 ? '' : 's'}
-              {mode === 'learn'
-                ? '. For each one the tutor shows and teaches the answer, takes your doubts, then asks you to explain it back; only your explanation is scored. Say “explain again”, “example” or “next” any time.'
-                : `, ${r?.followUps ? `up to ${r.followUps} follow ups each` : 'no follow ups'}. Say “hint”, “repeat” or “skip” any time.`}{' '}
-              Headphones stop its voice leaking into your mic.
-            </p>
           </div>
-          <Btn
-            kind="green"
-            disabled={!canStart || !r || (needsPack && !prepPack)}
-            onClick={() =>
-              onStart({
-                round,
-                mode,
-                ...(persona ? { persona } : {}),
-                ...(model ? { model } : {}),
-                ...(voice && opts.voices.some((v) => v.id === voice) ? { voice } : {}),
-                ...(topic && r?.topicPick ? { topic } : {}),
-                ...(prepPack && r?.job !== 'none' ? { prepPack } : {}),
-              })
-            }
-          >
-            Start interview
-          </Btn>
+          <p className="hint">
+            {r?.about} {r?.questions} {learn ? 'question' : 'main question'}
+            {r?.questions === 1 ? '' : 's'}
+            {learn
+              ? '. For each one the tutor shows and teaches the answer, takes your doubts, then asks you to explain it back; only your explanation is scored.'
+              : `, ${r?.followUps ? `up to ${r.followUps} follow ups each` : 'no follow ups'}.`}{' '}
+            Wear headphones so its voice doesn't leak into your mic.
+          </p>
+          <details className="settings">
+            <summary>
+              Call settings <span className="dim">{settingsSummary}</span>
+            </summary>
+            <div className="form-grid">
+              <label className="field">
+                <span className="field-label">{learn ? 'Tutor style' : 'Interviewer'}</span>
+                <select className="input" value={persona} onChange={(e) => setPersona(e.target.value)}>
+                  <option value="">Default for this round ({opts.personas.find((p) => p.id === r?.persona)?.label})</option>
+                  {opts.personas.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <VoiceSelect label={learn ? 'Tutor voice' : 'Interviewer voice'} value={voice} onChange={setVoice} opts={opts} dflt={learn ? opts.defaultTutorVoice : opts.defaultVoice} />
+              <label className="field">
+                <span className="field-label">When you finish answering</span>
+                <select className="input" value={turnKey} onChange={(e) => setTurnKey(e.target.value)}>
+                  {TURN_CHOICES.map((c) => (
+                    <option key={c.key} value={c.key}>
+                      {c.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span className="field-label">Voice model</span>
+                <select className="input" value={model} onChange={(e) => setModel(e.target.value)}>
+                  <option value="">Default for this round ({opts.models.find((m) => m.id === r?.model)?.label.split(':')[0]})</option>
+                  {opts.models.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </details>
+          <div className="start-row">
+            <Btn
+              kind="green"
+              disabled={!!blocked}
+              busyLabel="Connecting…"
+              onClick={() =>
+                onStart({
+                  round,
+                  mode,
+                  ...(persona ? { persona } : {}),
+                  ...(model ? { model } : {}),
+                  ...(voice ? { voice } : {}),
+                  turnTaking: turnChoice(turnKey).value,
+                  ...(topic && r?.topicPick ? { topic } : {}),
+                  ...(prepPack && r?.job !== 'none' ? { prepPack } : {}),
+                })
+              }
+            >
+              {learn ? 'Start lesson' : 'Start interview'}
+            </Btn>
+            {blocked && <span className="hint">{blocked}</span>}
+          </div>
         </Card>
       </Section>
       <Section title="Past sessions">
         {opts.sessions.length ? (
-          <div className="table-wrap">
-            <table className="table">
-              <tbody>
-                {opts.sessions.map((s) => (
-                  <tr key={s.id}>
-                    <td>
-                      <button type="button" className="linkish" onClick={() => onOpen(s.id)}>
-                        {opts.rounds.find((x) => x.id === s.round)?.label ?? s.round}
-                      </button>
-                    </td>
-                    <td className="dim">{ago(s.createdAt)}</td>
-                    <td className="dim">{s.model?.includes('thinking') ? 'thinking' : 'fast'}</td>
-                    <td className="dim">{s.durationSeconds ? mmss(s.durationSeconds) : '–'}</td>
-                    <td className="dim">{s.debriefs ? `🔊 ${s.debriefs}` : ''}</td>
-                    <td>{s.overall ? <Tag tone={scoreTone(s.overall)}>{s.overall}/10</Tag> : <Tag tone="dim">{s.status === 'live' ? 'not ended' : 'review pending'}</Tag>}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <ul className="history">
+            {opts.sessions.map((s) => (
+              <li key={s.id} className="history-row">
+                <button type="button" className="history-open" onClick={() => onOpen(s.id)}>
+                  <span className="history-title">
+                    {opts.rounds.find((x) => x.id === s.round)?.label ?? s.round}
+                    {s.mode === 'learn' && <Tag tone="dim">learn</Tag>}
+                    {s.picked && <Tag tone="dim">your pick</Tag>}
+                  </span>
+                  <span className="history-meta">
+                    {when(s.createdAt)}
+                    {s.durationSeconds ? ` · ${mmss(s.durationSeconds)}` : ''}
+                    {s.debriefs ? ` · ${s.debriefs} spoken review${s.debriefs === 1 ? '' : 's'}` : ''}
+                  </span>
+                </button>
+                <span className="history-score">
+                  {s.overall ? (
+                    <Tag tone={scoreTone(s.overall)}>{s.overall}/10</Tag>
+                  ) : s.status === 'live' ? (
+                    <Tag tone="dim">not ended</Tag>
+                  ) : s.gradingFailed ? (
+                    <Tag tone="bad">grading failed</Tag>
+                  ) : (
+                    <Tag tone="dim">{s.grading ? 'grading…' : 'not graded'}</Tag>
+                  )}
+                </span>
+                <DeleteButton id={s.id} onDeleted={onDeleted} />
+              </li>
+            ))}
+          </ul>
         ) : (
-          <Empty>No sessions yet.</Empty>
+          <Empty>No sessions yet. Your first round shows up here with its score.</Empty>
         )}
       </Section>
     </>
+  );
+}
+
+interface BankItem {
+  id: string;
+  folder: string;
+  question: string;
+  short: string;
+  asked: number;
+  lastScore: number | null;
+  lastAsked: string | null;
+  due: boolean;
+}
+
+const BANK_FILTERS: { id: string; label: string; test: (q: BankItem) => boolean }[] = [
+  { id: 'all', label: 'All', test: () => true },
+  { id: 'new', label: 'Never asked', test: (q) => !q.asked },
+  { id: 'due', label: 'Due for repeat', test: (q) => q.due },
+  { id: 'weak', label: 'Last score under 6', test: (q) => q.lastScore !== null && q.lastScore < 6 },
+];
+
+/**
+ * Every question in the bank with its answer. Read them, then start an interview or a lesson on one question,
+ * or on a few you pick (asked in the order you picked them). Calls use the settings saved on the start form.
+ */
+function QuestionBank({ opts, micOk, onStart, onBack }: { opts: Options; micOk: boolean; onStart: (input: Record<string, unknown>) => Promise<void>; onBack: () => void }) {
+  const [items, setItems] = useState<BankItem[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
+  const [topic, setTopic] = useRemembered<string>('vi.bankTopic', (v) => opts.topics.includes(v), '');
+  const [filter, setFilter] = useState('all');
+  const [open, setOpen] = useState<Set<string>>(() => new Set());
+  const [notes, setNotes] = useState<Record<string, string | null>>({});
+  const [picked, setPicked] = useState<string[]>([]);
+  useEffect(() => {
+    window.scrollTo(0, 0);
+    get<BankItem[]>('api/questions').then(setItems, (e) => setErr((e as Error).message));
+  }, []);
+
+  const voice = opts.voices.some((v) => v.id === remembered('vi.voice')) ? remembered('vi.voice') : '';
+  const turn = turnChoice(remembered('vi.turn'));
+  const blocked = !opts.configured ? 'Set GEMINI_API_KEY in .env and restart the server to start a call.' : !micOk ? 'The microphone needs localhost or HTTPS.' : null;
+  const start = (questions: string[], mode: 'interview' | 'learn') => onStart({ questions, mode, ...(voice ? { voice } : {}), turnTaking: turn.value });
+
+  const terms = search.toLowerCase().split(/\s+/).filter(Boolean);
+  const test = BANK_FILTERS.find((f) => f.id === filter)?.test ?? (() => true);
+  const shown = (items ?? []).filter((q) => (!topic || q.folder === topic) && test(q) && terms.every((t) => `${q.question}\n${q.short}`.toLowerCase().includes(t)));
+  const folders = [...new Set(shown.map((q) => q.folder))];
+  const full = picked.length >= opts.maxPicked;
+
+  const toggleOpen = (id: string) =>
+    setOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const togglePick = (id: string) => setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : p.length < opts.maxPicked ? [...p, id] : p));
+  const pickAll = (ids: string[]) => setPicked((p) => [...p, ...ids.filter((id) => !p.includes(id))].slice(0, opts.maxPicked));
+  const loadNotes = (id: string) => {
+    setNotes((n) => ({ ...n, [id]: null }));
+    get<{ notes: string }>(`api/question-notes?id=${encodeURIComponent(id)}`).then(
+      (r) => setNotes((n) => ({ ...n, [id]: r.notes || 'No notes in this file.' })),
+      (e) => setNotes((n) => ({ ...n, [id]: `Could not load the notes: ${(e as Error).message}` })),
+    );
+  };
+
+  return (
+    <>
+      <div className="bank-top">
+        <button type="button" className="btn ghost" onClick={onBack}>
+          ← Back
+        </button>
+        <p className="hint">
+          Calls use your saved settings: voice {voice || `default (${opts.defaultVoice} for interviews, ${opts.defaultTutorVoice} for lessons)`} · {turn.short}. Change them under Call settings on the start form.
+        </p>
+      </div>
+      <Section title="Question bank" sub={items ? `${shown.length} of ${items.length} questions` : undefined}>
+        <div className="bank-filters">
+          <input className="input" type="search" placeholder="Search questions and answers" value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search questions and answers" />
+          <select className="input" value={topic} onChange={(e) => setTopic(e.target.value)} aria-label="Topic">
+            <option value="">All topics</option>
+            {opts.topics.map((t) => (
+              <option key={t} value={t}>
+                {folderLabel(t)}
+              </option>
+            ))}
+          </select>
+          <select className="input" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Show">
+            {BANK_FILTERS.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        {blocked && <p className="hint">{blocked}</p>}
+        {err ? (
+          <ErrorBar message={`Could not load the questions: ${err}`} />
+        ) : !items ? (
+          <div className="loading">Loading…</div>
+        ) : !shown.length ? (
+          <Empty>No questions match. Clear the search or pick another topic.</Empty>
+        ) : (
+          folders.map((f) => {
+            const inFolder = shown.filter((q) => q.folder === f);
+            return (
+              <div key={f} className="bank-group">
+                <div className="bank-folder">
+                  <h3>{folderLabel(f)}</h3>
+                  <span className="dim">{inFolder.length}</span>
+                  <button type="button" className="linkish" onClick={() => pickAll(inFolder.map((q) => q.id))} disabled={full}>
+                    Pick {inFolder.length > opts.maxPicked - picked.length ? `first ${Math.max(0, opts.maxPicked - picked.length)}` : 'all'}
+                  </button>
+                </div>
+                <ul className="bank-list">
+                  {inFolder.map((q) => {
+                    const isOpen = open.has(q.id);
+                    const n = notes[q.id];
+                    const order = picked.indexOf(q.id);
+                    return (
+                      <li key={q.id} className={`bank-row ${order >= 0 ? 'picked' : ''}`}>
+                        <input type="checkbox" className="bank-check" checked={order >= 0} disabled={order < 0 && full} onChange={() => togglePick(q.id)} aria-label={`Pick: ${q.question}`} />
+                        <div className="bank-main">
+                          <button type="button" className="bank-q" aria-expanded={isOpen} onClick={() => toggleOpen(q.id)}>
+                            {order >= 0 && <span className="bank-order">{order + 1}</span>}
+                            {q.question}
+                          </button>
+                          <div className="bank-meta">
+                            {!q.asked ? <Tag tone="dim">new</Tag> : q.lastScore !== null ? <Tag tone={scoreTone(q.lastScore)}>last {q.lastScore}/10</Tag> : <Tag tone="dim">asked {q.asked}×</Tag>}
+                            {q.due && <Tag tone="warn">due</Tag>}
+                            {q.lastAsked && <span className="dim">asked {when(q.lastAsked)}</span>}
+                            <button type="button" className="linkish" onClick={() => toggleOpen(q.id)}>
+                              {isOpen ? 'Hide answer' : 'Show answer'}
+                            </button>
+                          </div>
+                          {isOpen && (
+                            <div className="bank-answer">
+                              <Md text={typeof n === 'string' ? n : q.short || 'No short answer in this file.'} />
+                              {n === undefined && (
+                                <button type="button" className="linkish" onClick={() => loadNotes(q.id)}>
+                                  Show full notes
+                                </button>
+                              )}
+                              {n === null && <span className="dim">Loading the full notes…</span>}
+                            </div>
+                          )}
+                        </div>
+                        <div className="bank-actions">
+                          <Btn kind="ghost" disabled={!!blocked} busyLabel="Connecting…" onClick={() => start([q.id], 'interview')}>
+                            Interview
+                          </Btn>
+                          <Btn kind="ghost" disabled={!!blocked} busyLabel="Connecting…" onClick={() => start([q.id], 'learn')}>
+                            Learn
+                          </Btn>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            );
+          })
+        )}
+      </Section>
+      {picked.length > 0 && (
+        <div className="bank-bar" role="region" aria-label="Picked questions">
+          <b>
+            {picked.length} picked{full ? ` (the most for one call)` : ''}
+          </b>
+          <Btn kind="green" disabled={!!blocked} busyLabel="Connecting…" onClick={() => start(picked, 'interview')}>
+            Interview on {picked.length === 1 ? 'it' : 'these'}
+          </Btn>
+          <Btn disabled={!!blocked} busyLabel="Connecting…" onClick={() => start(picked, 'learn')}>
+            Learn {picked.length === 1 ? 'it' : 'these'}
+          </Btn>
+          <button type="button" className="btn ghost" onClick={() => setPicked([])}>
+            Clear
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * Forgets a session: its file, its report, and its effect on which questions come back. Asks first.
+ * coach-notes.md keeps its summary (edit it by hand if needed).
+ */
+function DeleteButton({ id, onDeleted, label }: { id: string; onDeleted: () => void; label?: string }) {
+  return (
+    <button
+      type="button"
+      className="linkish danger"
+      title="Delete this session"
+      onClick={async () => {
+        if (!window.confirm('Delete this session? Its transcript and review are removed, and its questions count as never asked (unless another session asked them). This cannot be undone.')) return;
+        try {
+          await del(`api/sessions/${id}`);
+          onDeleted();
+        } catch (e) {
+          window.alert(`Could not delete: ${(e as Error).message}${e instanceof ApiError && e.unlock ? ' (sign in first)' : ''}`);
+        }
+      }}
+    >
+      {label ?? 'Delete'}
+    </button>
   );
 }
 
@@ -453,7 +882,14 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
   const [lesson, setLesson] = useState<{ id: string; question: string; notes: string; hidden: boolean; peek: boolean } | null>(null);
   const [notes, setNotes] = useState<{ question_id: string; rating: number; note: string }[]>([]);
   const [showNotes, setShowNotes] = useState(false);
+  /** Tool calls, ratings and the connection log: hidden by default, so the call feels like a call. Remembered. */
+  const [showWork, setShowWork] = useState(() => remembered('vi.showWork') === '1');
   const [muted, setMuted] = useState(false);
+  const [paused, setPaused] = useState(false);
+  const pausedRef = useRef(false);
+  const turnMode = session.turnTaking?.mode ?? 'auto';
+  const [turnState, setTurnState] = useState<TurnState>('theirs');
+  const turnRef = useRef<TurnState>('theirs');
   const [level, setLevel] = useState(0);
   /** The mic has been near silent for a while: the browser gets no sound (OS permission, wrong input). */
   const [micQuiet, setMicQuiet] = useState(false);
@@ -467,6 +903,7 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
   const [elapsed, setElapsed] = useState(0);
   const [saving, setSaving] = useState(false);
   const live = useRef<LiveInterview | null>(null);
+  const conn = useRef<Handoff<NonNullable<typeof pendingLive>> | null>(null);
   const t0 = useRef(performance.now());
   const turnsRef = useRef<Turn[]>([]);
   const endAsked = useRef(false);
@@ -511,12 +948,16 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
   };
 
   useEffect(() => {
-    const pending = pendingLive;
-    pendingLive = null;
-    if (!pending) {
+    const first = takeHandoff(conn, () => {
+      const pending = pendingLive;
+      pendingLive = null;
+      return pending;
+    });
+    if (!conn.current) {
       onError(new Error('The live connection was not created. Start again.'));
       return;
     }
+    const c = conn.current;
     const addText = (who: Turn['who'], text: string) => {
       const t = now();
       const list = turnsRef.current;
@@ -568,10 +1009,16 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
           }
         }),
       );
-    const { li, started } = pending;
+    const { li, started } = c.value;
     live.current = li;
-    li.connect(started.live.wsUrl, started.live.token, started.live.setup, {
-      onState: setState,
+    li.turnMode = turnMode;
+    if (first) li.connect(started.live.wsUrl, started.live.token, started.live.setup, {
+      onState: (st) => {
+        setState(st);
+        // Button mode: once it starts answering after your Done, the turn is theirs.
+        if (st === 'speaking' && turnRef.current === 'waiting') setTurnState((turnRef.current = 'theirs'));
+      },
+      onTurn: (t) => setTurnState((turnRef.current = t)),
       onTranscript: addText,
       onToolCalls: runCalls,
       onTurnComplete: () => {
@@ -597,6 +1044,8 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
     let quietLogged = false;
     const timer = setInterval(() => {
       setElapsed(now());
+      // Not a mic problem while paused, or in button mode while it is not your turn.
+      if (pausedRef.current || (turnMode === 'button' && turnRef.current !== 'yours')) lastLoud.current = performance.now();
       const quiet = performance.now() - lastLoud.current > 12_000;
       setMicQuiet(quiet);
       if (quiet && !quietLogged) {
@@ -625,14 +1074,14 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
     window.addEventListener('pagehide', onHide);
     window.addEventListener('error', onErr);
     window.addEventListener('unhandledrejection', onRejection);
-    addLog('browser', navigator.userAgent);
+    if (first) addLog('browser', navigator.userAgent);
     return () => {
       clearInterval(timer);
       clearInterval(logTimer);
       window.removeEventListener('pagehide', onHide);
       window.removeEventListener('error', onErr);
       window.removeEventListener('unhandledrejection', onRejection);
-      li.stop();
+      c.stopTimer = setTimeout(() => li.stop(), 0);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -645,19 +1094,41 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
 
   const asked = plan.filter((q) => q.asked).length;
   const learn = session.mode === 'learn';
+  const togglePause = () => {
+    const next = !pausedRef.current;
+    pausedRef.current = next;
+    setPaused(next);
+    void live.current?.setPaused(next);
+  };
+  const toggleWork = () => {
+    setShowWork(!showWork);
+    remember('vi.showWork', showWork ? '' : '1');
+  };
+  const stateLabel = learn && state === 'speaking' ? 'Tutor speaking' : STATE_LABEL[state];
   return (
     <>
-      <div className={`nowbar ${state === 'closed' ? '' : 'live'}`}>
-        <Tag tone={state === 'speaking' ? 'warn' : state === 'listening' ? 'ok' : 'dim'}>{learn && state === 'speaking' ? 'Tutor speaking' : STATE_LABEL[state]}</Tag>
-        {learn && <Tag>Learn mode</Tag>}
-        <b>{mmss(elapsed)}</b>
-        <span className="dim">
-          Question {Math.max(asked, 1)} of {plan.length}
-        </span>
-        <span className="meter" aria-label="Microphone level">
-          <span style={{ width: `${Math.min(100, Math.round(level * 400))}%` }} />
-        </span>
-        <span className="controls">
+      {paused && <PausedCover onResume={togglePause} />}
+      <section className={`callpanel ${state === 'closed' ? '' : 'live'}`} aria-label={learn ? 'Lesson' : 'Interview call'}>
+        <div className="callpanel-top">
+          {/* Announced to screen readers when it changes; the timer stays outside so it isn't read every second. */}
+          <span className="callstate" role="status" aria-live="polite">
+            <Tag tone={state === 'speaking' ? 'warn' : state === 'listening' ? 'ok' : 'dim'}>{stateLabel}</Tag>
+            {learn && <Tag>Learn mode</Tag>}
+            <span>
+              Question {Math.max(asked, 1)} of {plan.length}
+            </span>
+          </span>
+          <b className="timer">{mmss(elapsed)}</b>
+          <span className="meter" aria-hidden="true">
+            <span style={{ width: `${Math.min(100, Math.round(level * 400))}%` }} />
+          </span>
+        </div>
+        <p className="callhint">
+          {learn ? 'Say “explain again”, “example”, “next” or “stop” any time.' : 'Say “hint”, “repeat” or “skip” any time.'}
+          {turnMode === 'button' ? ' Press Space when you finish answering.' : ''}
+        </p>
+        <div className="callbar">
+          <CallControls li={live.current} turnMode={turnMode} turn={turnState} state={state} paused={paused} onPause={togglePause} />
           <Btn
             kind="ghost"
             onClick={() => {
@@ -667,15 +1138,16 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
           >
             {muted ? 'Unmute' : 'Mute'}
           </Btn>
-          <Btn kind="danger" disabled={saving} onClick={() => finish('ended on the page')}>
-            {saving ? 'Saving…' : 'End interview'}
-          </Btn>
-        </span>
-      </div>
+          <span className="callbar-end">
+            <ConfirmButton disabled={saving} confirmLabel="Press again to end" onConfirm={() => finish('ended on the page')}>
+              {saving ? 'Saving…' : learn ? 'End lesson' : 'End interview'}
+            </ConfirmButton>
+          </span>
+        </div>
+      </section>
       {micQuiet && !muted && (
-        <div className="nowbar">
-          <Tag tone="warn">Mic silent</Tag> The page gets no sound from your microphone, so the interviewer can't hear you. Check the mic icon in the browser's address bar, your
-          system's microphone permission for the browser, and that the input level moves when you talk.
+        <div className="nowbar warn" role="alert">
+          <Tag tone="warn">Mic silent</Tag> The page gets no sound from your microphone, so the {learn ? 'tutor' : 'interviewer'} can't hear you. Check the mic icon in the browser's address bar, your system's microphone permission for the browser, and that the input level moves when you talk.
         </div>
       )}
       {learn && (
@@ -699,9 +1171,19 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
           )}
         </Section>
       )}
-      <div className="live-grid">
-        <Section title="Conversation" sub="live transcript">
-          <Transcript turns={turns} empty="Waiting for the interviewer to start…" endRef={transcriptEnd} />
+      <div className={showWork ? 'live-grid' : ''}>
+        <div>
+          <Section
+            title="Conversation"
+            sub="live transcript"
+            actions={
+              <button type="button" className="linkish" aria-expanded={showWork} onClick={toggleWork}>
+                {showWork ? 'Hide' : 'Show'} what the {learn ? 'tutor' : 'interviewer'} is doing ({calls.length})
+              </button>
+            }
+          >
+            <Transcript turns={turns} empty={`Waiting for the ${learn ? 'tutor' : 'interviewer'} to start…`} endRef={transcriptEnd} />
+          </Section>
           <Section title="Plan" sub={`${asked}/${plan.length} asked`}>
             <ol className="plan">
               {plan.map((q) => (
@@ -711,30 +1193,32 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
               ))}
             </ol>
           </Section>
-        </Section>
-        <Section
-          title="Tool calls"
-          sub={`${calls.length} so far`}
-          actions={
-            <button type="button" className="linkish" onClick={() => setShowNotes(!showNotes)}>
-              {showNotes ? 'Hide' : 'Show'} interviewer ratings ({notes.length})
-            </button>
-          }
-        >
-          {showNotes && notes.length > 0 && (
-            <Card>
-              {notes.map((n, i) => (
-                <div key={i}>
-                  <Tag tone={scoreTone(n.rating)}>{n.rating}/10</Tag> {n.note}
-                </div>
-              ))}
-            </Card>
-          )}
-          <div className="calls">
-            {calls.length ? [...calls].reverse().map((c, i) => <CallCard key={c.key} call={c} open={i === 0} hideResult={c.name === 'record_note' && !showNotes} />) : <Empty>No tool calls yet.</Empty>}
-          </div>
-          <ConnectionLog entries={log} />
-        </Section>
+        </div>
+        {showWork && (
+          <Section
+            title="Tool calls"
+            sub={`${calls.length} so far`}
+            actions={
+              <button type="button" className="linkish" onClick={() => setShowNotes(!showNotes)}>
+                {showNotes ? 'Hide' : 'Show'} ratings ({notes.length})
+              </button>
+            }
+          >
+            {showNotes && notes.length > 0 && (
+              <Card>
+                {notes.map((n, i) => (
+                  <div key={i}>
+                    <Tag tone={scoreTone(n.rating)}>{n.rating}/10</Tag> {n.note}
+                  </div>
+                ))}
+              </Card>
+            )}
+            <div className="calls">
+              {calls.length ? [...calls].reverse().map((c, i) => <CallCard key={c.key} call={c} open={i === 0} hideResult={c.name === 'record_note' && !showNotes} />) : <Empty>No tool calls yet.</Empty>}
+            </div>
+            <ConnectionLog entries={log} />
+          </Section>
+        )}
       </div>
     </>
   );
@@ -744,8 +1228,11 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
  * The review, spoken: a coach voice walks through Claude's review answer by answer, reads the stronger
  * answers, and lets the candidate practise them out loud. The transcript is kept with the session.
  */
-function Debrief({ sessionId, voice, onDone }: { sessionId: string; voice: string; onDone: () => void }) {
+function Debrief({ sessionId, voice, turnMode, onDone }: { sessionId: string; voice: string; turnMode: 'auto' | 'button'; onDone: () => void }) {
   const [state, setState] = useState<LiveState>('connecting');
+  const [paused, setPaused] = useState(false);
+  const [turnState, setTurnState] = useState<TurnState>('theirs');
+  const turnRef = useRef<TurnState>('theirs');
   const [turns, setTurns] = useState<Turn[]>([]);
   const [level, setLevel] = useState(0);
   const [elapsed, setElapsed] = useState(0);
@@ -756,6 +1243,7 @@ function Debrief({ sessionId, voice, onDone }: { sessionId: string; voice: strin
   const endAsked = useRef(false);
   const finished = useRef(false);
   const end = useRef<HTMLDivElement>(null);
+  const conn = useRef<Handoff<NonNullable<typeof pendingDebrief>> | null>(null);
   const now = () => (performance.now() - t0.current) / 1000;
   const url = `api/sessions/${sessionId}/debrief/end`;
 
@@ -768,20 +1256,29 @@ function Debrief({ sessionId, voice, onDone }: { sessionId: string; voice: strin
   };
 
   useEffect(() => {
-    const pending = pendingDebrief;
-    pendingDebrief = null;
-    if (!pending) {
+    const first = takeHandoff(conn, () => {
+      const pending = pendingDebrief;
+      pendingDebrief = null;
+      return pending;
+    });
+    if (!conn.current) {
       setError('The voice connection was not created. Press Listen again.');
       return;
     }
-    const { li, live: started } = pending;
+    const c = conn.current;
+    const { li, live: started } = c.value;
     live.current = li;
-    li.connect(
+    li.turnMode = turnMode;
+    if (first) li.connect(
       started.wsUrl,
       started.token,
       started.setup,
       {
-        onState: setState,
+        onState: (st) => {
+          setState(st);
+          if (st === 'speaking' && turnRef.current === 'waiting') setTurnState((turnRef.current = 'theirs'));
+        },
+        onTurn: (t) => setTurnState((turnRef.current = t)),
         onTranscript: (who, text) => {
           const t = now();
           const list = turnsRef.current;
@@ -824,7 +1321,7 @@ function Debrief({ sessionId, voice, onDone }: { sessionId: string; voice: strin
     return () => {
       clearInterval(timer);
       window.removeEventListener('pagehide', onHide);
-      li.stop();
+      c.stopTimer = setTimeout(() => li.stop(), 0);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -833,21 +1330,30 @@ function Debrief({ sessionId, voice, onDone }: { sessionId: string; voice: strin
     end.current?.scrollIntoView({ block: 'nearest' });
   }, [turns]);
 
+  const togglePause = () => {
+    const next = !paused;
+    setPaused(next);
+    void live.current?.setPaused(next);
+  };
   return (
     <Section title="Spoken review" sub="say “next”, “repeat”, “slower”, “why”, or “stop”; try the stronger answers out loud">
+      {paused && <PausedCover onResume={togglePause} />}
       <div className="nowbar live">
-        <Tag tone={state === 'speaking' ? 'warn' : state === 'listening' ? 'ok' : 'dim'}>{state === 'speaking' ? 'Coach speaking' : STATE_LABEL[state]}</Tag>
+        <span role="status" aria-live="polite">
+          <Tag tone={state === 'speaking' ? 'warn' : state === 'listening' ? 'ok' : 'dim'}>{state === 'speaking' ? 'Coach speaking' : STATE_LABEL[state]}</Tag>
+        </span>
         <b>{mmss(elapsed)}</b>
-        <span className="meter" aria-label="Microphone level">
+        <span className="meter" aria-hidden="true">
           <span style={{ width: `${Math.min(100, Math.round(level * 400))}%` }} />
         </span>
-        {error && <Tag tone="bad">{error}</Tag>}
         <span className="controls">
+          <CallControls li={live.current} turnMode={turnMode} turn={turnState} state={state} paused={paused} onPause={togglePause} />
           <Btn kind="danger" onClick={finish}>
-            Stop
+            End review
           </Btn>
         </span>
       </div>
+      {error && <ErrorBar message={error} />}
       <Transcript turns={turns} coach empty="The coach is getting ready…" endRef={end} />
     </Section>
   );
@@ -928,11 +1434,19 @@ function Pending({ s, opts, onRetry }: { s: Session; opts: Options; onRetry: () 
         <b>This session never ended.</b>
       </Card>
     );
+  if (!s.transcript.some((t) => t.who === 'candidate'))
+    return (
+      <Card tone="accent">
+        <b>Nothing to grade</b>
+        <p className="hint">No answers were recorded in this call.</p>
+      </Card>
+    );
   if (s.reviewError)
     return (
-      <Card tone="bad">
+      <Card tone="bad" role="alert">
         <b>Grading failed</b>
-        <p className="hint">{s.reviewError}</p>
+        <p>{friendlyError(s.reviewError).text}</p>
+        {friendlyError(s.reviewError).detail && <p className="hint">{s.reviewError}</p>}
         {opts.grading && (
           <Btn kind="green" onClick={onRetry}>
             Try again
@@ -941,11 +1455,33 @@ function Pending({ s, opts, onRetry }: { s: Session; opts: Options; onRetry: () 
         {byHand}
       </Card>
     );
-  if (s.grading || opts.grading)
+  if (s.grading) {
+    // The server allows a new attempt after 10 minutes (POST .../grade).
+    const stale = Date.now() - Date.parse(s.grading.startedAt) > 10 * 60_000;
     return (
       <Card tone="accent">
         <b>Claude is grading the call</b>
         <p className="hint">It scores each answer and writes a stronger way to say it. This usually takes a minute or two; the page checks every 10 seconds.</p>
+        {stale && (
+          <>
+            <p className="hint">This is taking much longer than usual.</p>
+            <Btn kind="green" onClick={onRetry}>
+              Try again
+            </Btn>
+          </>
+        )}
+      </Card>
+    );
+  }
+  if (opts.grading)
+    return (
+      <Card tone="accent">
+        <b>Not graded yet</b>
+        <p className="hint">Grading never started for this call.</p>
+        <Btn kind="green" onClick={onRetry}>
+          Grade now
+        </Btn>
+        {byHand}
       </Card>
     );
   return (
@@ -969,6 +1505,7 @@ function Done({ id, opts, onBack }: { id: string; opts: Options; onBack: () => v
   const [s, setS] = useState<Session | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [listening, setListening] = useState(false);
+  const [debriefTurn, setDebriefTurn] = useState<'auto' | 'button'>('auto');
   const [reload, setReload] = useState(0);
   useEffect(() => {
     let stop = false;
@@ -978,7 +1515,8 @@ function Done({ id, opts, onBack }: { id: string; opts: Options; onBack: () => v
         (x) => {
           if (stop) return;
           setS(x);
-          if (x.status === 'ended' && !x.reviewError && (x.grading || opts.grading)) timer = setTimeout(tick, 10_000);
+          // Only while grading really runs: the server sets the flag before /end or /grade answers.
+          if (x.status === 'ended' && x.grading && !x.reviewError) timer = setTimeout(tick, 10_000);
         },
         (e) => setErr(e.message),
       );
@@ -987,80 +1525,90 @@ function Done({ id, opts, onBack }: { id: string; opts: Options; onBack: () => v
       stop = true;
       if (timer) clearTimeout(timer);
     };
-  }, [id, reload, opts.grading]);
+  }, [id, reload]);
 
   if (!s) return <div className="loading">{err ?? 'Loading the session…'}</div>;
   const m = s.metrics;
   const wpm = m?.wordsPerMinute && m.wordsPerMinute >= 60 && m.wordsPerMinute <= 260 ? m.wordsPerMinute : null;
   const canTalk = window.isSecureContext && !!navigator.mediaDevices && opts.configured;
+  const roundLabel = opts.rounds.find((r) => r.id === s.round)?.label ?? s.round;
+  const learn = s.mode === 'learn';
+  const listen = async () => {
+    setErr(null);
+    const li = new LiveInterview();
+    try {
+      await li.prepareAudio();
+      const turnTaking = turnChoice(remembered('vi.turn')).value;
+      const live = await post<LiveStart & { voice: string; turnTaking: TurnTaking }>(`api/sessions/${id}/debrief`, {
+        ...(opts.voices.some((v) => v.id === coachVoice) ? { voice: coachVoice } : {}),
+        turnTaking,
+      });
+      setUsedVoice(live.voice);
+      setDebriefTurn(live.turnTaking?.mode ?? 'auto');
+      pendingDebrief = { li, live };
+      setListening(true);
+    } catch (e) {
+      li.stop();
+      setErr((e as Error).message);
+    }
+  };
+  // The start form opens on this round and mode next time.
+  const again = () => {
+    remember('vi.round', s.round);
+    remember('vi.mode', s.mode ?? 'interview');
+    onBack();
+  };
   return (
     <>
-      <div className="nowbar">
+      <div className="done-head">
         <Btn kind="ghost" onClick={onBack}>
           ← New round
         </Btn>
-        {s.review && !listening && (
-          <Btn
-            kind="green"
-            disabled={!canTalk}
-            title={canTalk ? 'A voice coach talks you through this review; you can ask questions and practise the stronger answers' : 'Needs the microphone and GEMINI_API_KEY'}
-            onClick={async () => {
-              setErr(null);
-              const li = new LiveInterview();
-              try {
-                await li.prepareAudio();
-                const live = await post<LiveStart & { voice: string }>(`api/sessions/${id}/debrief`, opts.voices.some((v) => v.id === coachVoice) ? { voice: coachVoice } : {});
-                setUsedVoice(live.voice);
-                pendingDebrief = { li, live };
-                setListening(true);
-              } catch (e) {
-                li.stop();
-                setErr((e as Error).message);
-              }
-            }}
-          >
-            🔊 Listen to the review
-          </Btn>
-        )}
-        {s.review && !listening && (
-          <span className="voice-pick">
-            <VoiceSelect label="Coach voice" value={coachVoice} onChange={setCoachVoice} opts={opts} />
-          </span>
-        )}
         <span className="dim">
-          {id}
-          {s.mode === 'learn' ? ' · learn mode' : ''}
-          {s.model ? ` · ${s.model}` : ''} ·{' '}
-          <a href={`api/sessions/${id}`} target="_blank" rel="noopener">
-            raw JSON
-          </a>
+          {roundLabel}
+          {learn ? ' · learn mode' : ''} · {when(s.createdAt)}
+          {s.durationSeconds ? ` · ${mmss(s.durationSeconds)}` : ''}
         </span>
       </div>
-      {err && (
-        <div className="nowbar">
-          <Tag tone="bad">Error</Tag> {err}
-        </div>
-      )}
-      {listening && (
-        <Debrief
-          sessionId={id}
-          voice={usedVoice}
-          onDone={() => {
-            setListening(false);
-            setReload((n) => n + 1);
-          }}
-        />
-      )}
-      {m && (
-        <div className="stats">
-          <Stat label="words / min" value={wpm ?? '–'} hint="Calm and clear is roughly 120 to 160" />
-          <Stat label="fillers / min" value={m.fillersPerMinute ?? '–'} tone={(m.fillersPerMinute ?? 0) > 4 ? 'warn' : undefined} />
-          <Stat label="words / sentence" value={m.avgWordsPerSentence ?? '–'} tone={(m.avgWordsPerSentence ?? 0) > 22 ? 'warn' : undefined} />
-          <Stat label="longest answer" value={mmss(m.longestAnswerSeconds)} />
-          <Stat label="sir / sorry" value={`${m.sirMadam} / ${m.apologies}`} tone={m.sirMadam + m.apologies ? 'warn' : undefined} />
-        </div>
-      )}
-      {!s.review ? (
+      {err && <ErrorBar message={err} />}
+      {s.review ? (
+        <section className={`verdict ${scoreTone(s.review.overall)}`} aria-label="Verdict">
+          <div className="verdict-score">
+            <span className="verdict-num">
+              {s.review.overall}
+              <small>/10</small>
+            </span>
+            <span className="verdict-label">overall</span>
+          </div>
+          <div className="verdict-body">
+            <p className="verdict-summary">{s.review.summary}</p>
+            {s.review.next_focus.length > 0 && (
+              <>
+                <h2 className="verdict-h">Next time, focus on</h2>
+                <ul className="verdict-focus">
+                  {s.review.next_focus.map((f, i) => (
+                    <li key={i}>{f}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {!listening && (
+              <div className="verdict-actions">
+                <Btn kind="green" disabled={!canTalk} busyLabel="Connecting…" title={canTalk ? undefined : 'Needs the microphone and GEMINI_API_KEY'} onClick={listen}>
+                  <SpeakerIcon />
+                  Listen to the review
+                </Btn>
+                <span className="voice-pick">
+                  <VoiceSelect label="Coach voice" value={coachVoice} onChange={setCoachVoice} opts={opts} />
+                </span>
+                <Btn kind="ghost" onClick={again}>
+                  Practise this round again
+                </Btn>
+              </div>
+            )}
+          </div>
+        </section>
+      ) : (
         <Pending
           s={s}
           opts={opts}
@@ -1070,75 +1618,99 @@ function Done({ id, opts, onBack }: { id: string; opts: Options; onBack: () => v
             setReload((n) => n + 1);
           }}
         />
-      ) : (
-        <>
-          <Section title={`Overall ${s.review.overall}/10`} sub={s.review.reviewer ? `graded by ${s.review.reviewer}` : undefined}>
-            <Card>
-              <p>{s.review.summary}</p>
-              {s.review.next_focus.length > 0 && (
-                <>
-                  <b>Next time, focus on</b>
-                  <ul>
-                    {s.review.next_focus.map((f, i) => (
-                      <li key={i}>{f}</li>
-                    ))}
-                  </ul>
-                </>
-              )}
-              {s.review.delivery && <p className="dim">{s.review.delivery}</p>}
-            </Card>
-          </Section>
-          {s.debriefs?.length ? (
-            <Section title="Spoken debriefs" sub={`${s.debriefs.length} · also in reports/${id}.md`}>
-              {[...s.debriefs].reverse().map((d, i) => (
-                <details key={d.at} className="call" open={i === 0}>
-                  <summary>
-                    {ago(d.at)} · {mmss(d.durationSeconds)}
-                    {d.voice ? ` · ${d.voice}` : ''}
-                  </summary>
-                  <Transcript turns={d.transcript} coach tall />
-                </details>
-              ))}
-            </Section>
-          ) : null}
-          <Section title="Answers">
-            {s.review.answers.map((a, i) => (
-              <Card key={i} tone={scoreTone(a.score)}>
-                <div>
-                  <Tag tone={scoreTone(a.score)}>{a.score}/10</Tag> <b>{a.question}</b>
-                </div>
-                <ul>
-                  <li>
-                    <b>Content:</b> {a.technical}
-                  </li>
-                  <li>
-                    <b>Structure:</b> {a.structure}
-                  </li>
-                  <li>
-                    <b>Delivery:</b> {a.delivery}
-                  </li>
-                  <li>
-                    <b>Fix next time:</b> {a.fix}
-                  </li>
-                </ul>
-                <span className="field-label">A stronger way to say it</span>
-                <blockquote className="rewrite">{a.rewrite}</blockquote>
-              </Card>
-            ))}
-          </Section>
-        </>
       )}
-      <Section title="Tool calls" sub={`${s.toolCalls.length}`}>
-        <div className="calls">
-          {s.toolCalls.map((c, i) => (
-            <CallCard key={i} call={{ key: String(i), name: c.name, args: c.args, at: (Date.parse(c.at) - Date.parse(s.toolCalls[0].at)) / 1000, result: c.result, ms: c.ms, error: c.error }} open={false} />
+      {listening && (
+        <Debrief
+          sessionId={id}
+          voice={usedVoice}
+          turnMode={debriefTurn}
+          onDone={() => {
+            setListening(false);
+            setReload((n) => n + 1);
+          }}
+        />
+      )}
+      {m && (
+        <Section title="Delivery" sub={s.review?.delivery}>
+          <div className="stats">
+            <Stat label="words / min" value={wpm ?? '–'} note="calm: 120 to 160" tone={wpm && (wpm < 110 || wpm > 175) ? 'warn' : undefined} />
+            <Stat label="fillers / min" value={m.fillersPerMinute ?? '–'} note="aim under 3" tone={(m.fillersPerMinute ?? 0) > 3 ? 'warn' : undefined} />
+            <Stat label="words / sentence" value={m.avgWordsPerSentence ?? '–'} note="aim under 20" tone={(m.avgWordsPerSentence ?? 0) > 22 ? 'warn' : undefined} />
+            <Stat label="longest answer" value={mmss(m.longestAnswerSeconds)} note="aim under 3 min" tone={m.longestAnswerSeconds > 180 ? 'warn' : undefined} />
+            <Stat label="sir / sorry" value={`${m.sirMadam} / ${m.apologies}`} note="aim for none" tone={m.sirMadam + m.apologies ? 'warn' : undefined} />
+          </div>
+        </Section>
+      )}
+      {s.review && (
+        <Section title="Answers">
+          {s.review.answers.map((a, i) => (
+            <Card key={i} tone={scoreTone(a.score)}>
+              <h3 className="answer-q">
+                <Tag tone={scoreTone(a.score)}>{a.score}/10</Tag> {a.question}
+              </h3>
+              <ul>
+                <li>
+                  <b>Content:</b> {a.technical}
+                </li>
+                <li>
+                  <b>Structure:</b> {a.structure}
+                </li>
+                <li>
+                  <b>Delivery:</b> {a.delivery}
+                </li>
+                <li>
+                  <b>Fix next time:</b> {a.fix}
+                </li>
+              </ul>
+              <span className="field-label">A stronger way to say it</span>
+              <blockquote className="rewrite">{a.rewrite}</blockquote>
+            </Card>
           ))}
-        </div>
-      </Section>
-      {s.debug?.length ? <ConnectionLog entries={s.debug} /> : null}
+        </Section>
+      )}
+      {s.debriefs?.length ? (
+        <Section title="Spoken reviews" sub={`${s.debriefs.length} · also in reports/${id}.md`}>
+          {[...s.debriefs].reverse().map((d, i) => (
+            <details key={d.at} className="call" open={i === 0}>
+              <summary>
+                {when(d.at)} · {mmss(d.durationSeconds)}
+                {d.voice ? ` · ${d.voice}` : ''}
+              </summary>
+              <Transcript turns={d.transcript} coach tall />
+            </details>
+          ))}
+        </Section>
+      ) : null}
       <Section title="Transcript">
         <Transcript turns={s.transcript} tall />
       </Section>
+      <details className="details-foot">
+        <summary>
+          Session details <span className="dim">id, model, tool calls, connection log, delete</span>
+        </summary>
+        <p className="dim">
+          {id}
+          {s.turnTaking?.mode === 'button' ? ' · Done button' : ''}
+          {s.model ? ` · ${s.model}` : ''}
+          {s.review?.reviewer ? ` · graded by ${s.review.reviewer}` : ''} ·{' '}
+          <a href={`api/sessions/${id}`} target="_blank" rel="noopener">
+            raw JSON
+          </a>
+        </p>
+        <Section title="Tool calls" sub={`${s.toolCalls.length}`}>
+          <div className="calls">
+            {s.toolCalls.length ? (
+              s.toolCalls.map((c, i) => <CallCard key={i} call={{ key: String(i), name: c.name, args: c.args, at: (Date.parse(c.at) - Date.parse(s.toolCalls[0].at)) / 1000, result: c.result, ms: c.ms, error: c.error }} open={false} />)
+            ) : (
+              <Empty>No tool calls in this session.</Empty>
+            )}
+          </div>
+        </Section>
+        {s.debug?.length ? <ConnectionLog entries={s.debug} /> : null}
+        <p>
+          <DeleteButton id={id} onDeleted={onBack} label="Delete this session" />
+        </p>
+      </details>
     </>
   );
 }

@@ -49,7 +49,7 @@ test('paths and skip rules read an existing layout as it is', () => {
   assert.match(review.systemPrompt(), /## Extra rules from the candidate\n- Never use a year in a rewrite\./);
 });
 
-test('mounted under a prefix: redirect to the trailing slash, API works, the guard protects paid routes only', async () => {
+test('mounted under a prefix: redirect to the trailing slash, API works, the guard protects every write and no read', async () => {
   const seen: string[] = [];
   const host = express();
   host.use(
@@ -83,7 +83,20 @@ test('mounted under a prefix: redirect to the trailing slash, API works, the gua
     assert.match(((await passed.json()) as any).error, /GEMINI_API_KEY/);
 
     assert.equal((await fetch(`${base}/interview/api/nope`)).status, 404);
-    assert.deepEqual(seen, ['/api/sessions', '/api/sessions']);
+    const deleted = await fetch(`${base}/interview/api/sessions/2026-11-11-1000-screening`, { method: 'DELETE' });
+    assert.equal(deleted.status, 401, 'deleting is guarded too');
+    // Ending a call starts paid grading, and a posted review rewrites the notes files: both are writes.
+    for (const route of ['end', 'tool', 'log', 'review', 'debrief/end']) {
+      const r = await fetch(`${base}/interview/api/sessions/2026-11-11-1000-screening/${route}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      assert.equal(r.status, 401, `POST ${route} is guarded`);
+    }
+    assert.equal((await fetch(`${base}/interview/api/sessions/2026-11-11-1000-screening`)).status, 404, 'reads skip the guard');
+    assert.deepEqual(seen, [
+      '/api/sessions',
+      '/api/sessions',
+      '/api/sessions/2026-11-11-1000-screening',
+      ...['end', 'tool', 'log', 'review', 'debrief/end'].map((r) => `/api/sessions/2026-11-11-1000-screening/${r}`),
+    ]);
   } finally {
     server.close();
   }

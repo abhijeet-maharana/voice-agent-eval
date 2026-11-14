@@ -28,6 +28,8 @@ export const get = <T>(url: string) => call<T>(url);
 export const post = <T = unknown>(url: string, body: unknown = {}) =>
   call<T>(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 
+export const del = <T = unknown>(url: string) => call<T>(url, { method: 'DELETE' });
+
 /** Fire and forget, survives the tab closing (pagehide). */
 export const beacon = (url: string, body: unknown) =>
   void fetch(url, { method: 'POST', keepalive: true, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).catch(() => undefined);

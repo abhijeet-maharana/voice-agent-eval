@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express, { type Request, type RequestHandler, type Response } from 'express';
 import { gradeSession, gradingConfigured, reviewPrompt, writeNotes } from './review';
-import { appendLog, cleanupSessions, deleteSession, endSession, loadSession, pageOptions, runTool, saveDebrief, saveReview, startDebrief, startSession } from './sessions';
+import { appendLog, cleanupSessions, deleteSession, endSession, loadSession, pageOptions, questionList, questionNotes, recoverGrading, runTool, saveDebrief, saveReview, startDebrief, startSession } from './sessions';
 import { HttpError, loadConfig } from './workspace';
 
 /**
@@ -30,7 +30,10 @@ export type ReviewEvent =
 export interface InterviewAppOptions {
   /** The workspace folder (sets WORKSPACE for this process). */
   workspace?: string;
-  /** Runs before the routes that spend money: starting a call, grading, a spoken debrief. E.g. a login check. */
+  /**
+   * Runs before every write (any method but GET and HEAD): starting a call, its tool calls, ending it (which
+   * starts paid grading), grading, posting a review, deleting, debriefs. E.g. a login check. Reads stay open.
+   */
   guard?: RequestHandler;
   /** Runs before the page itself is served. */
   pageGuard?: RequestHandler;
@@ -48,6 +51,8 @@ export function createInterviewApp(opts: InterviewAppOptions = {}): express.Rout
   if (opts.workspace) process.env.WORKSPACE = opts.workspace;
   const guard = opts.guard ?? pass;
   const router = express.Router();
+  // Every write goes through the guard, before the body is even parsed.
+  router.use((req, res, next) => (req.method === 'GET' || req.method === 'HEAD' ? next() : guard(req, res, next)));
   router.use(express.json({ limit: '4mb' }));
 
   const handle = (fn: (req: Request) => unknown) => async (req: Request, res: Response) => {
@@ -102,10 +107,13 @@ export function createInterviewApp(opts: InterviewAppOptions = {}): express.Rout
   };
 
   router.get('/api/options', handle(() => pageOptions(new Date(), gradingConfigured())));
-  router.post('/api/sessions', guard, handle((req) => startSession(req.body || {})));
+  router.get('/api/questions', handle(() => questionList()));
+  // Ids hold a slash (`<folder>/<file>`), so the id is a query parameter.
+  router.get('/api/question-notes', handle((req) => questionNotes(String(req.query.id ?? ''))));
+  router.post('/api/sessions', handle((req) => startSession(req.body || {})));
   router.get('/api/sessions/:id', handle((req) => loadSession(id(req))));
   // Deleting forgets the session: its file, its report, and its effect on spaced repetition.
-  router.delete('/api/sessions/:id', guard, handle((req) => deleteSession(id(req))));
+  router.delete('/api/sessions/:id', handle((req) => deleteSession(id(req))));
   router.post(
     '/api/sessions/:id/tool',
     handle((req) => runTool(id(req), String(req.body?.name ?? '').slice(0, 60), req.body?.args && typeof req.body.args === 'object' ? req.body.args : {}, new Date(), Number(req.body?.t))),
@@ -120,7 +128,6 @@ export function createInterviewApp(opts: InterviewAppOptions = {}): express.Rout
   );
   router.post(
     '/api/sessions/:id/grade',
-    guard,
     handle((req) => {
       const s = loadSession(id(req));
       if (s.review) throw new HttpError(409, 'Already reviewed');
@@ -146,14 +153,15 @@ export function createInterviewApp(opts: InterviewAppOptions = {}): express.Rout
         writeNotes(
           {
             coach_notes: { recurring_gaps: list(body.coach_notes.recurring_gaps), getting_better: list(body.coach_notes.getting_better), drill_next: list(body.coach_notes.drill_next) },
-            interviewer_rules: list(body.interviewer_rules),
+            // A lesson's tutor is not the interviewer: its review leaves the interviewer rules alone.
+            interviewer_rules: r.session.mode === 'learn' ? undefined : list(body.interviewer_rules),
           },
           r.session.id,
         );
       return r;
     }),
   );
-  router.post('/api/sessions/:id/debrief', guard, handle((req) => startDebrief(id(req), { voice: req.body?.voice, turnTaking: req.body?.turnTaking })));
+  router.post('/api/sessions/:id/debrief', handle((req) => startDebrief(id(req), { voice: req.body?.voice, turnTaking: req.body?.turnTaking })));
   router.post('/api/sessions/:id/debrief/end', handle((req) => saveDebrief(id(req), req.body || {})));
   router.use('/api', (_req, res) => {
     res.status(404).json({ error: 'No such API route' });
@@ -169,6 +177,15 @@ export function createInterviewApp(opts: InterviewAppOptions = {}): express.Rout
     res.sendFile(path.join(webDist, 'index.html'));
   });
   router.use('/assets', express.static(path.join(webDist, 'assets'), { index: false, maxAge: '1h' }));
+
+  // Grading runs in this process, so a grading flag left by a restart would never clear: the page would say
+  // "Claude is grading" forever. Turn those into an error the page can retry.
+  try {
+    const stuck = recoverGrading();
+    if (stuck.length) console.log(`[voice-interviewer] grading interrupted by a restart: ${stuck.join(', ')}`);
+  } catch (err) {
+    console.error('[voice-interviewer] grading recovery failed:', (err as Error).message);
+  }
 
   if (opts.cleanup !== false) {
     const tidy = () => {

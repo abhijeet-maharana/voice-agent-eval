@@ -157,4 +157,6 @@ export interface Session {
   /** The interviewer's voice (a VOICES name). */
   voice?: string;
   turnTaking?: TurnTaking;
+  /** The candidate picked the questions on the question bank page (not spaced repetition). */
+  picked?: boolean;
 }

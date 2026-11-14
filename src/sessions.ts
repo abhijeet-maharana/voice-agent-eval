@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { CLOSER, MAX_ADDED, bankEntry, dayKey, loadBank, nextDue, pickQuestions, questionFile, readProgress, relatedQuestion, topicFolders, words } from './bank';
 import { DEBRIEF_TOOLS, LEARN_TOOLS, TOOLS, VOICES, debriefInstruction, learnInstruction, liveConfig, liveModels, liveSetup, mintToken, pickTurnTaking, pickVoice, systemInstruction } from './interviewer';
-import type { LiveModelId, Metrics, Mode, Progress, Review, ReviewAnswer, Session, ToolCall, TranscriptTurn } from './types';
+import type { BankQuestion, LiveModelId, Metrics, Mode, Progress, Review, ReviewAnswer, Round, Session, ToolCall, TranscriptTurn } from './types';
 import { HttpError, listPrepPacks, loadConfig, paths, profileTexts, readJson, readPrepPack, requireWorkspace, scrub, writeJson, writeText } from './workspace';
 
 /**
@@ -51,6 +51,10 @@ export function listSessions() {
         status: s.status,
         durationSeconds: s.durationSeconds,
         overall: s.review?.overall,
+        mode: s.mode ?? 'interview',
+        picked: !!s.picked,
+        grading: !!s.grading,
+        gradingFailed: !!s.reviewError,
         questions: s.plan.length,
         debriefs: s.debriefs?.length ?? 0,
       }))
@@ -72,33 +76,62 @@ export interface StartInput {
   prepPack?: string;
   /** `fast` or `thinking`; default: the round's. */
   model?: string;
-  /** A VOICES name; default GEMINI_LIVE_VOICE (Kore). */
+  /** A VOICES name; default GEMINI_LIVE_VOICE (Kore), or GEMINI_LIVE_TUTOR_VOICE (Sulafat) in learn mode. */
   voice?: string;
   /** `interview` or `learn`; default: config.json defaultMode. */
   mode?: string;
   /** `{ mode: 'auto', pauseMs }` or `{ mode: 'button' }`; default auto, 3 seconds. */
   turnTaking?: unknown;
+  /** Question ids picked on the question bank page (1 to MAX_PICKED), asked in this order instead of the round's mix. */
+  questions?: unknown;
+}
+
+/** At most this many questions can be picked by hand for one call. */
+export const MAX_PICKED = 10;
+
+/** The picked questions, checked against the bank; undefined when none were picked. */
+function pickedQuestions(v: unknown, bank: BankQuestion[]): BankQuestion[] | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (!Array.isArray(v) || !v.length || v.length > MAX_PICKED) throw new HttpError(400, `questions must be a list of 1 to ${MAX_PICKED} question ids`);
+  const byId = new Map(bank.map((q) => [q.id, q]));
+  return [...new Set(v.map(String))].map((id) => {
+    const q = byId.get(id);
+    if (!q) throw new HttpError(400, `Unknown question: ${id}`);
+    return q;
+  });
+}
+
+/**
+ * The round for hand picked questions (its persona, length and follow ups): the one whose folders hold most
+ * of them, else one with a topic pick, never one that needs a prep pack.
+ */
+function roundFor(rounds: Round[], picked: BankQuestion[]): Round | undefined {
+  const open = rounds.filter((r) => r.job !== 'required');
+  const fit = (r: Round) => picked.filter((q) => q.folder in r.mix).length;
+  const best = open.reduce<Round | undefined>((a, r) => (fit(r) > (a ? fit(a) : 0) ? r : a), undefined);
+  return best ?? open.find((r) => r.topicPick) ?? open[0] ?? rounds[0];
 }
 
 export async function startSession(input: StartInput, opts: { now?: Date; fetchImpl?: typeof fetch } = {}) {
   requireWorkspace();
   const config = loadConfig();
-  const round = config.rounds.find((r) => r.id === input.round);
+  const bank = loadBank();
+  const picked = pickedQuestions(input.questions, bank);
+  const round = picked && !input.round ? roundFor(config.rounds, picked) : config.rounds.find((r) => r.id === input.round);
   if (!round) throw new HttpError(400, `Unknown round. Pick one of: ${config.rounds.map((r) => r.id).join(', ')}`);
   const persona = input.persona && config.personas[input.persona] ? input.persona : round.persona;
   if (round.job === 'required' && !input.prepPack) throw new HttpError(400, 'This round needs a prep pack');
   if (input.prepPack) readPrepPack(input.prepPack);
-  const bank = loadBank();
   if (input.topic && (!round.topicPick || !topicFolders(bank).includes(input.topic))) throw new HttpError(400, 'Unknown topic');
   const models = liveModels();
   if (input.model && !(input.model in models)) throw new HttpError(400, `Unknown model. Pick one of: ${Object.keys(models).join(', ')}`);
   if (input.mode && input.mode !== 'interview' && input.mode !== 'learn') throw new HttpError(400, 'Unknown mode. Pick interview or learn');
   const mode: Mode = (input.mode as Mode | undefined) ?? config.defaultMode;
   const modelChoice = (input.model as LiveModelId | undefined) ?? round.model;
-  const voice = pickVoice(input.voice, liveConfig().voice);
+  const voice = pickVoice(input.voice, mode === 'learn' ? liveConfig().tutorVoice : liveConfig().voice);
   const turnTaking = pickTurnTaking(input.turnTaking);
   const now = opts.now ?? new Date();
-  const questions = pickQuestions(round, bank, readProgress(), { topic: input.topic, now });
+  const questions = picked ?? pickQuestions(round, bank, readProgress(), { topic: input.topic, now });
   if (!questions.length) throw new HttpError(400, `No questions for the ${round.label} round. Add files to ${Object.keys(round.mix).map((f) => `questions/${f}/`).join(', ')}`);
   const token = await mintToken(round.minutes, opts.fetchImpl);
   let id = `${stamp(now)}-${round.id}`;
@@ -114,6 +147,7 @@ export async function startSession(input: StartInput, opts: { now?: Date; fetchI
     model: models[modelChoice].model,
     voice,
     turnTaking,
+    ...(picked ? { picked: true } : {}),
     createdAt: now.toISOString(),
     status: 'live',
     plan: questions.map((q) => ({ id: q.id, question: q.question, asked: false })),
@@ -122,10 +156,11 @@ export async function startSession(input: StartInput, opts: { now?: Date; fetchI
     transcript: [],
   };
   saveSession(session);
+  const asyncTools = { thinking: modelChoice === 'thinking' };
   const setup =
     mode === 'learn'
-      ? liveSetup(session.model!, learnInstruction(session, round, config), LEARN_TOOLS, voice, turnTaking)
-      : liveSetup(session.model!, systemInstruction(session, round, config), TOOLS, voice, turnTaking);
+      ? liveSetup(session.model!, learnInstruction(session, round, config), LEARN_TOOLS, voice, turnTaking, asyncTools)
+      : liveSetup(session.model!, systemInstruction(session, round, config), TOOLS, voice, turnTaking, asyncTools);
   const kickoff = mode === 'learn' ? '(The candidate has joined the call. Start the lesson now.)' : '(The candidate has joined the call. Start the interview now.)';
   return { session, live: { wsUrl: liveConfig().wsUrl, token, setup, kickoff } };
 }
@@ -540,6 +575,56 @@ export function cleanupSessions(now = new Date()) {
   return result;
 }
 
+/**
+ * Grading runs inside the server process, so a `grading` flag from before a restart never clears. Each one
+ * older than `olderThanMs` becomes a reviewError, so the page stops waiting and offers Try again.
+ */
+export function recoverGrading(olderThanMs = 0, now = new Date()): string[] {
+  const dir = paths.sessions();
+  if (!fs.existsSync(dir)) return [];
+  const recovered: string[] = [];
+  for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.json'))) {
+    const s = readJson<Session | null>(path.join(dir, f), null);
+    if (!s?.grading || s.review) continue;
+    if (now.getTime() - Date.parse(s.grading.startedAt) < olderThanMs) continue;
+    delete s.grading;
+    s.reviewError = 'Grading was interrupted (the server restarted). Press Try again.';
+    saveSession(s);
+    recovered.push(s.id);
+  }
+  return recovered;
+}
+
+// ---------- Question bank page ----------
+
+/** Every question in the bank, its short answer and how it has gone so far. Private words are taken out. */
+export function questionList(now = new Date()) {
+  requireWorkspace();
+  const config = loadConfig();
+  const progress = readProgress();
+  const today = dayKey(now);
+  return loadBank().map((q) => {
+    const p = progress[q.id];
+    return {
+      id: q.id,
+      folder: q.folder,
+      question: scrub(q.question, config),
+      short: scrub(q.short, config),
+      asked: p?.asked ?? 0,
+      lastScore: p?.scores.at(-1) ?? null,
+      lastAsked: p?.lastAsked ?? null,
+      due: !!p && p.nextDue <= today,
+    };
+  });
+}
+
+/** One question's full notes (the file without its title), for the question bank page. */
+export function questionNotes(id: string) {
+  const q = bankEntry(id);
+  if (!q) throw new HttpError(404, 'No such question');
+  return { id, notes: lessonNotes(id) };
+}
+
 // ---------- Page options ----------
 
 export function pageOptions(now = new Date(), grading = false) {
@@ -555,12 +640,14 @@ export function pageOptions(now = new Date(), grading = false) {
     models: Object.entries(liveModels()).map(([id, m]) => ({ id, ...m })),
     voices: Object.entries(VOICES).map(([id, style]) => ({ id, style })),
     defaultVoice: liveConfig().voice,
+    defaultTutorVoice: liveConfig().tutorVoice,
     defaultMode: config.defaultMode,
     rounds: config.rounds.map(({ only: _only, mix, ...r }) => ({ ...r, questions: Object.values(mix).reduce((a, b) => a + b, 0) })),
     personas: Object.entries(config.personas).map(([id, p]) => ({ id, label: p.label })),
     topics: topicFolders(bank),
     prepPacks: listPrepPacks(),
     dueCount: Object.values(progress).filter((p) => p.nextDue <= today).length,
+    maxPicked: MAX_PICKED,
     sessions: listSessions(),
   };
 }
