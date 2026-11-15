@@ -60,7 +60,7 @@ export function createInterviewApp(opts: InterviewAppOptions = {}): express.Rout
       res.json({ result: await fn(req) });
     } catch (err) {
       const status = err instanceof HttpError ? err.status : 500;
-      if (status >= 500) console.error(`[voice-interviewer] ${req.method} ${req.path}:`, (err as Error).message);
+      if (status >= 500) console.error(`[voice-agent-eval] ${req.method} ${req.path}:`, (err as Error).message);
       res.status(status).json({ error: (err as Error).message });
     }
   };
@@ -71,7 +71,7 @@ export function createInterviewApp(opts: InterviewAppOptions = {}): express.Rout
     if (opts.onReview) hooks.push(Promise.resolve().then(() => opts.onReview!(event)));
     if (process.env.REVIEW_WEBHOOK_URL)
       hooks.push(fetch(process.env.REVIEW_WEBHOOK_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(event), signal: AbortSignal.timeout(10_000) }));
-    for (const r of await Promise.allSettled(hooks)) if (r.status === 'rejected') console.error('[voice-interviewer] review hook failed:', (r.reason as Error)?.message ?? r.reason);
+    for (const r of await Promise.allSettled(hooks)) if (r.status === 'rejected') console.error('[voice-agent-eval] review hook failed:', (r.reason as Error)?.message ?? r.reason);
   };
 
   /** Starts grading in the background; the page polls the session until the review lands. */
@@ -85,7 +85,7 @@ export function createInterviewApp(opts: InterviewAppOptions = {}): express.Rout
       (r) => {
         const review = loadSession(sessionId).review!;
         const weakest = [...review.answers].sort((a, b) => a.score - b.score)[0];
-        console.log(`[voice-interviewer] reviewed ${sessionId}: ${r.overall}/10`);
+        console.log(`[voice-agent-eval] reviewed ${sessionId}: ${r.overall}/10`);
         void notify({
           type: 'reviewed',
           sessionId,
@@ -99,7 +99,7 @@ export function createInterviewApp(opts: InterviewAppOptions = {}): express.Rout
         });
       },
       (err) => {
-        console.error(`[voice-interviewer] grading ${sessionId} failed: ${(err as Error).message}`);
+        console.error(`[voice-agent-eval] grading ${sessionId} failed: ${(err as Error).message}`);
         void notify({ type: 'failed', sessionId, round, error: (err as Error).message });
       },
     );
@@ -172,7 +172,7 @@ export function createInterviewApp(opts: InterviewAppOptions = {}): express.Rout
     const urlPath = req.originalUrl.split('?')[0];
     if (!urlPath.endsWith('/')) return res.redirect(301, `${path.posix.basename(urlPath)}/`);
     if (!fs.existsSync(path.join(webDist, 'index.html')))
-      return res.status(503).type('text/plain').send('The page is not built yet. Run "npm run build" in voice-interviewer, then reload.');
+      return res.status(503).type('text/plain').send('The page is not built yet. Run "npm run build" in voice-agent-eval, then reload.');
     res.setHeader('Cache-Control', 'no-cache');
     res.sendFile(path.join(webDist, 'index.html'));
   });
@@ -182,18 +182,18 @@ export function createInterviewApp(opts: InterviewAppOptions = {}): express.Rout
   // "Claude is grading" forever. Turn those into an error the page can retry.
   try {
     const stuck = recoverGrading();
-    if (stuck.length) console.log(`[voice-interviewer] grading interrupted by a restart: ${stuck.join(', ')}`);
+    if (stuck.length) console.log(`[voice-agent-eval] grading interrupted by a restart: ${stuck.join(', ')}`);
   } catch (err) {
-    console.error('[voice-interviewer] grading recovery failed:', (err as Error).message);
+    console.error('[voice-agent-eval] grading recovery failed:', (err as Error).message);
   }
 
   if (opts.cleanup !== false) {
     const tidy = () => {
       try {
         const r = cleanupSessions();
-        if (r.deleted.length || r.compacted.length) console.log(`[voice-interviewer] cleanup: deleted ${r.deleted.length} unanswered, compacted ${r.compacted.length}`);
+        if (r.deleted.length || r.compacted.length) console.log(`[voice-agent-eval] cleanup: deleted ${r.deleted.length} unanswered, compacted ${r.compacted.length}`);
       } catch (err) {
-        console.error('[voice-interviewer] cleanup failed:', (err as Error).message);
+        console.error('[voice-agent-eval] cleanup failed:', (err as Error).message);
       }
     };
     tidy();

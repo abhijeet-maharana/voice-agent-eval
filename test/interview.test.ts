@@ -9,7 +9,7 @@ import { test } from 'node:test';
 // fake client.
 
 process.env.TZ = 'UTC';
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-interviewer-'));
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-agent-eval-'));
 Object.assign(process.env, { WORKSPACE: root, GEMINI_API_KEY: '', ANTHROPIC_API_KEY: '' });
 
 const write = (rel: string, text: string) => {

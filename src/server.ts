@@ -19,7 +19,7 @@ app.use(createInterviewApp());
 
 app.listen(PORT, HOST, () => {
   const local = HOST === '0.0.0.0' || HOST === '127.0.0.1' ? 'localhost' : HOST;
-  console.log(`voice-interviewer on http://${local}:${PORT}`);
+  console.log(`voice-agent-eval on http://${local}:${PORT}`);
   console.log(`  workspace: ${workspaceDir()}${fs.existsSync(workspaceDir()) ? '' : ' (missing: run "npm run setup")'}`);
   console.log(`  live interviewer: ${process.env.GEMINI_API_KEY ? 'on' : 'off (set GEMINI_API_KEY in .env)'}`);
   console.log(`  grading with Claude: ${gradingConfigured() ? 'on' : 'off (set ANTHROPIC_API_KEY in .env, or grade by hand)'}`);

@@ -9,7 +9,7 @@ import express from 'express';
 // Using an existing notes folder through `paths` and `skip` in config.json, and mounting the app under a
 // prefix inside another Express app with a guard, the way an existing dashboard embeds it.
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-interviewer-app-'));
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-agent-eval-app-'));
 const write = (rel: string, text: string) => {
   fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
   fs.writeFileSync(path.join(root, rel), text);
