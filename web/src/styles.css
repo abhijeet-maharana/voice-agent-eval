@@ -155,6 +155,20 @@ code { font-family: var(--mono); background: var(--card); border: 1px solid var(
 /* Code and text diagrams: never wrapped, so box drawings stay aligned; scroll sideways instead. */
 .md .md-code { font-family: var(--mono); font-size: 12.5px; line-height: 1.25; tab-size: 2; white-space: pre; overflow-x: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 0 0 10px; }
 .bank-answer .md .md-code { background: var(--card); }
+/* Diagrams: the tutor's show_diagram and ```mermaid blocks in notes. Wide ones scroll instead of shrinking to unreadable. */
+.diagram { margin: 4px 0 14px; padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
+.diagram figcaption { color: var(--heading); font-weight: 600; margin-bottom: 8px; }
+.diagram-svg { overflow-x: auto; text-align: center; }
+.diagram-svg svg { max-width: 100%; height: auto; min-width: min(520px, 100%); }
+.diagram .md-code { margin-bottom: 0; }
+.diagram figcaption { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.diagram-wait { color: var(--dim); font-weight: 400; font-size: 13px; }
+/* Drawing while the tutor speaks: parts fade in as they are named; the one being talked about is outlined. */
+.diagram-svg .dg-hide { opacity: 0; }
+.diagram-svg g.node, .diagram-svg .flowchart-link, .diagram-svg .edgeLabel, .diagram-svg .messageText, .diagram-svg [class^='messageLine'] { transition: opacity 0.45s ease; }
+.diagram-svg g.dg-now :is(rect, polygon, circle, ellipse, path) { stroke: var(--amber) !important; stroke-width: 3px !important; }
+.diagram-svg text.dg-now { fill: var(--amber-ink) !important; font-weight: 600; }
+@media (prefers-reduced-motion: reduce) { .diagram-svg * { transition: none !important; } }
 .md .md-code:focus-visible, .md-table:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .md-table { container-type: inline-size; overflow-x: auto; margin: 0 0 10px; border: 1px solid var(--border); border-radius: 8px; }
@@ -241,7 +255,8 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid currentColor;
 .timer { margin-left: auto; font-size: 18px; color: var(--heading); font-variant-numeric: tabular-nums; }
 .callhint { margin: 8px 0 12px; color: var(--text); }
 .callbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.callbar-end { margin-left: auto; }
+.callbar-end { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; }
+.btn.ghost.armed { border-color: var(--amber); color: var(--amber-ink); }
 
 /* Review: the verdict first */
 .done-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-bottom: 18px; }
@@ -311,3 +326,19 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid currentColor;
   .bank-row { grid-template-columns: auto minmax(0, 1fr); }
   .bank-actions { grid-column: 2; }
 }
+
+/* Guess the blanks: labels hidden until tapped; the shapes stay so the structure is the cue. */
+.diagram.quiz .diagram-svg .dg-blank, .diagram.quiz .diagram-svg .dg-blank * { color: transparent !important; cursor: pointer; }
+.diagram.quiz .diagram-svg text.dg-blank, .diagram.quiz .diagram-svg .dg-blank text, .diagram.quiz .diagram-svg .dg-blank tspan { fill: transparent !important; }
+.diagram.quiz .diagram-svg g.node.dg-blank :is(rect, polygon, circle, ellipse, path) { stroke-dasharray: 5 4; }
+.diagram.quiz .diagram-svg g.node.dg-blank:hover :is(rect, polygon, circle, ellipse, path) { stroke: var(--accent) !important; }
+
+/* The saved diagram of a bank item, with Add / Revise / Test me. */
+.dg-panel { margin: 4px 0 14px; }
+.dg-panel .diagram { margin-bottom: 8px; }
+.dg-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0; }
+.dg-ask { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
+.dg-ask .input { flex: 1 1 240px; }
+.dg-draft { border: 1px dashed var(--accent); border-radius: 8px; padding: 10px; margin: 6px 0; }
+.dg-draft > .dg-label { color: var(--accent-ink); font-size: 13px; font-weight: 600; margin: 0 0 6px; }
+.dg-panel .bad-ink { color: var(--red-ink); }

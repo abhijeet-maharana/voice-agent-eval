@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express, { type Request, type RequestHandler, type Response } from 'express';
+import { diagramFor, draftDiagram, saveDiagram } from './diagrams';
 import { gradeSession, gradingConfigured, reviewPrompt, writeNotes } from './review';
 import { appendLog, cleanupSessions, deleteSession, endSession, loadSession, pageOptions, questionList, questionNotes, recoverGrading, runTool, saveDebrief, saveReview, startDebrief, startSession } from './sessions';
 import { HttpError, loadConfig } from './workspace';
@@ -110,6 +111,17 @@ export function createInterviewApp(opts: InterviewAppOptions = {}): express.Rout
   router.get('/api/questions', handle(() => questionList()));
   // Ids hold a slash (`<folder>/<file>`), so the id is a query parameter.
   router.get('/api/question-notes', handle((req) => questionNotes(String(req.query.id ?? ''))));
+  // Saved diagrams: read one, have Claude draw or revise one (nothing saved), save what you keep.
+  router.get('/api/question-diagram', handle((req) => diagramFor(String(req.query.id ?? ''))));
+  router.post(
+    '/api/question-diagram/draft',
+    handle((req) => {
+      if (!gradingConfigured()) throw new HttpError(503, 'Drawing needs ANTHROPIC_API_KEY on the server.');
+      const b = req.body || {};
+      return draftDiagram(String(b.id ?? ''), { instruction: b.instruction, current: b.current, error: b.error, force: b.force });
+    }),
+  );
+  router.post('/api/question-diagram/save', handle((req) => saveDiagram(String(req.body?.id ?? ''), req.body || {})));
   router.post('/api/sessions', handle((req) => startSession(req.body || {})));
   router.get('/api/sessions/:id', handle((req) => loadSession(id(req))));
   // Deleting forgets the session: its file, its report, and its effect on spaced repetition.

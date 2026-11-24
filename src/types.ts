@@ -57,6 +57,8 @@ export interface BankQuestion {
   question: string;
   /** The file's "Short Answer" section (or its first paragraph): what a strong answer covers. */
   short: string;
+  /** `saved`: the file has a `## Diagram` (diagram-text.ts); `none`: it is marked as not needing one. */
+  diagram?: 'saved' | 'none';
   /**
    * From a `**Priority:** 1` line in the file: 1 must know, 2 common (the default), 3 advanced. Rounds ask
    * never-asked questions in this order, and the question bank lists them in it.
@@ -153,6 +155,8 @@ export interface Session {
   review?: Review;
   /** Set while Claude grades the call; cleared when the review is saved or grading fails. */
   grading?: { startedAt: string };
+  /** Ended with "End without review": grading did not start on its own (it can still be started later). */
+  reviewSkipped?: boolean;
   /** Why the last grading attempt failed (shown on the page, with a retry button). */
   reviewError?: string;
   /** The page's connection log (Gemini Live events), for debugging; also printed to the server log. */

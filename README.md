@@ -165,14 +165,29 @@ Add the matching folders under `questions/` and they show up on the start screen
 
 ### Learn mode
 
-Pick **Learn** on the start screen (or set `"defaultMode": "learn"` in `config.json`). The agent becomes a slow-speaking tutor (voice **Sulafat** by default; change it with **Tutor voice** or `GEMINI_LIVE_TUTOR_VOICE`):
+Pick **Learn** on the start screen (or set `"defaultMode": "learn"` in `config.json`). The agent becomes a slow-speaking tutor (voice **Erinome**, labelled "Clear", by default; change it with **Tutor voice** or `GEMINI_LIVE_TUTOR_VOICE`):
 
 1. It reads out the question, and the reference answer from the question file appears on screen.
-2. It teaches the answer in plain spoken words and takes questions; it answers from your notes and says so when they don't cover something.
-3. When the person is ready, it hides the answer and asks them to explain it back.
+2. It teaches the answer in plain spoken words and takes questions; it answers from your notes and says so when they don't cover something. When the idea has moving parts (a flow, layers, a request path) it sends a diagram with the `show_diagram` tool (Mermaid), and the page draws it while the tutor talks: each box appears the moment the tutor says its name (timed to the audio as it plays, not to when the text arrives), and the box being talked about is outlined. If a turn of talk names no new box, the rest appears; **Show all** shows it at once. Say "draw it" to ask for one. A ` ```mermaid ` block in a question file is drawn too.
+3. When the person is ready, it hides the answer and asks them to explain it back. If the item has a saved diagram, **Test me on the diagram** shows it with every label blanked: name each box out loud, then tap it to check.
 4. It says what they got and what they missed, allows one more try, then moves on.
 
+### Saved diagrams
+
+A question file can keep its own diagram in a `## Diagram` section (a bold title line, then a ` ```mermaid ` block), placed after the short answer. A lesson shows the saved diagram with its question and draws it as the tutor names each box, so the live model does not have to invent one.
+
+In the question bank, each open item shows its diagram with:
+
+- **Add diagram** (or **Describe what to draw**): Claude (`claude-opus-5-5` by default, change it with `DIAGRAM_MODEL`) draws one from the file. For items where a picture would not help (a behavioural answer, a single definition), it says so; **Mark as not needed** saves a `No diagram:` line so it is not offered again.
+- **Revise…**: say what to change ("add a cache box", "make it a sequence diagram"); Claude changes only that.
+- **Test me**: every label blanked until you tap it.
+- **Remove**.
+
+Claude's drawing is a draft until you press **Save**, which writes it into the file. A draft Mermaid can't draw is sent back to Claude once to fix. The **No diagram yet** filter lists the items without one. Uses the same `ANTHROPIC_API_KEY` as grading.
+
 After the call, Claude grades only the explain-back answers and updates spaced repetition.
+
+Any call (lesson or interview) can end with **End without review**: the transcript is saved but Claude does not grade it, so nothing is spent and spaced repetition is untouched. **Grade now** on the next screen still grades it later.
 
 ### Using an existing notes folder
 
@@ -239,6 +254,7 @@ Standalone, set `REVIEW_WEBHOOK_URL` to get the same review event as a JSON `POS
 
 - **Gemini Live:** billed per minute of audio by Google. Check the current Live API pricing for your model.
 - **Claude grading:** one request per call; the cost depends on the call length and the model you pick.
+- **Diagrams:** one request per draw or revise, about 3,000 tokens in and a few hundred out (around $0.02 on `claude-opus-5-5`).
 
 ## Development
 

@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { readDiagram } from './diagram-text';
 import type { BankQuestion, Progress, Round, Session } from './types';
 import { loadConfig, paths, readJson } from './workspace';
 
@@ -44,7 +45,9 @@ export function parseQuestion(folder: string, file: string, text: string): BankQ
     .replace(/\s*\([^)]*\)\s*$/, '')
     .trim();
   const priority = Number(text.match(PRIORITY_LINE)?.[1] ?? DEFAULT_PRIORITY);
-  return { id: `${folder}/${file.replace(/\.md$/, '')}`, folder, question, short: short.slice(0, 1500), priority };
+  const drawn = readDiagram(text);
+  const diagram = drawn ? ('diagram' in drawn ? 'saved' : 'none') : undefined;
+  return { id: `${folder}/${file.replace(/\.md$/, '')}`, folder, question, short: short.slice(0, 1500), priority, ...(diagram ? { diagram } : {}) };
 }
 
 /** 1 must know, 2 common, 3 advanced. Files without a `**Priority:**` line count as common. */

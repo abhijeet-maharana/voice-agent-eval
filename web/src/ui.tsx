@@ -67,7 +67,7 @@ export function Btn({ onClick, children, kind, title, disabled, busyLabel }: { o
  * For actions that end something (End interview): the first press arms it ("Press again to end"), a second
  * press within 4 seconds does it. No dialog, so a live call keeps running while you decide.
  */
-export function ConfirmButton({ onConfirm, children, confirmLabel, disabled }: { onConfirm: () => unknown; children: ReactNode; confirmLabel: ReactNode; disabled?: boolean }) {
+export function ConfirmButton({ onConfirm, children, confirmLabel, disabled, kind = 'danger' }: { onConfirm: () => unknown; children: ReactNode; confirmLabel: ReactNode; disabled?: boolean; kind?: 'danger' | 'ghost' }) {
   const [armed, setArmed] = useState(false);
   useEffect(() => {
     if (!armed) return;
@@ -77,7 +77,7 @@ export function ConfirmButton({ onConfirm, children, confirmLabel, disabled }: {
   return (
     <button
       type="button"
-      className={`btn danger ${armed ? 'armed' : ''}`}
+      className={`btn ${kind} ${armed ? 'armed' : ''}`}
       disabled={disabled}
       onClick={() => {
         if (!armed) return setArmed(true);

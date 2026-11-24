@@ -6,7 +6,7 @@ export type Block =
   | { kind: 'p'; text: string }
   | { kind: 'quote'; paras: string[] }
   | { kind: 'list'; items: Item[] }
-  | { kind: 'code'; text: string }
+  | { kind: 'code'; text: string; lang?: string }
   | { kind: 'table'; head: string[]; rows: string[][] }
   | { kind: 'hr' };
 
@@ -32,10 +32,11 @@ export function parse(text: string): Block[] {
     if (!line.trim()) {
       i++;
     } else if (line.trimStart().startsWith('```')) {
+      const lang = line.trim().slice(3).trim().toLowerCase();
       const code: string[] = [];
       while (++i < lines.length && !lines[i].trimStart().startsWith('```')) code.push(lines[i]);
       i++;
-      out.push({ kind: 'code', text: code.join('\n') });
+      out.push({ kind: 'code', text: code.join('\n'), ...(lang ? { lang } : {}) });
     } else if (HEADING.test(line)) {
       const [, hashes, body] = line.match(HEADING)!;
       out.push({ kind: 'heading', level: hashes.length, text: body.trim() });

@@ -23,8 +23,8 @@ export function liveModels(): Record<LiveModelId, { label: string; model: string
 export function liveConfig() {
   return {
     voice: process.env.GEMINI_LIVE_VOICE || 'Kore',
-    /** Learn mode: a warm voice, not the firm interviewer one. */
-    tutorVoice: process.env.GEMINI_LIVE_TUTOR_VOICE || 'Sulafat',
+    /** Learn mode: a voice Google labels "Clear", not the firm interviewer one. */
+    tutorVoice: process.env.GEMINI_LIVE_TUTOR_VOICE || 'Erinome',
     wsUrl:
       process.env.GEMINI_LIVE_WS_URL ||
       'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained',
@@ -96,8 +96,9 @@ export const TOOLS = [
 ] as const;
 
 /**
- * Learn mode: the same tools minus related_question, plus start_recall. next_question also returns the
- * answer, which the page shows on screen while the tutor teaches it.
+ * Learn mode: the same tools minus related_question, plus show_diagram and start_recall. next_question also
+ * returns the answer, which the page shows on screen while the tutor teaches it; show_diagram draws a Mermaid
+ * diagram next to it.
  */
 export const LEARN_TOOLS = [
   {
@@ -111,6 +112,24 @@ export const LEARN_TOOLS = [
   },
   TOOLS[2],
   TOOLS[3],
+  {
+    name: 'show_diagram',
+    description:
+      "Draw a diagram on the candidate's screen while you teach: a flow, layers, a request path, parts that talk to each other, a before/after. Call it before you explain. The screen starts empty and draws each box the moment you say its label out loud, so say every label, in the order you want them drawn. It replaces the last diagram for this question.",
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        question_id: { type: 'STRING', description: 'The question_id from next_question.' },
+        title: { type: 'STRING', description: 'A few words, e.g. "One request through the event loop".' },
+        mermaid: {
+          type: 'STRING',
+          description:
+            'Mermaid code. Use "flowchart LR" (or TD) for flows and parts, "sequenceDiagram" for who calls whom in order. At most about 8 boxes. Labels of 1 to 4 everyday words you will actually say ("Load balancer", not "LB"), in quotes for flowcharts, e.g. flowchart LR\n  A["Client"] --> B["Load balancer"] --> C["App server"]. Sequence messages without quotes, e.g. Client->>Server: Send request',
+        },
+      },
+      required: ['question_id', 'title', 'mermaid'],
+    },
+  },
   {
     name: 'start_recall',
     description: 'Call when the candidate is ready to explain the answer back. The page hides the answer, and from now on their words for this question are scored. Then ask them to explain it as they would in an interview.',
@@ -199,6 +218,17 @@ export function systemInstruction(s: Session, round: Round, config: Config): str
   return lines.join('\n');
 }
 
+/**
+ * How the tutor and the coach pace their speech. Live has no speaking-rate setting (only the voice name),
+ * so the prompt sets it. About 140 words per minute sits in the 140-180 range usually given for learners,
+ * at its slow end: slower than a normal call, still natural.
+ */
+const PACING_RULES = [
+  '- Pace: speak slowly and clearly, about 140 words per minute, slower than a normal conversation. Never rush, even when there is a lot to cover.',
+  '- One idea per sentence, about 15 words at most. Pause briefly after each key term and between points so they can take it in.',
+  '- Give a small concrete example right after any abstract point.',
+];
+
 /** The tutor of learn mode: teach each answer, take doubts, then have the candidate explain it back. */
 export function learnInstruction(s: Session, round: Round, config: Config): string {
   const lines = [
@@ -210,6 +240,7 @@ export function learnInstruction(s: Session, round: Round, config: Config): stri
     'For each question, in this order:',
     '1. Call next_question. It gives the question and a model answer; the same answer is on the candidate\'s screen. Read the question out.',
     '2. Teach the answer in simple spoken words: the one line headline first, then the 2 or 3 key points, then a short real example of how it shows up at work. Explain why, not just what. Two or three short sentences per turn, then check in: "Does that make sense?"',
+    '   If next_question returns a diagram, it is already on their screen: walk through it as you teach, saying each label exactly as written, in order, and do not call show_diagram for it. Otherwise, show, do not only tell: when the idea has moving parts (a flow, layers, a request path, parts that talk to each other, a before and after), call show_diagram first, before you explain, with a small diagram. The screen draws each box only when you say its label, so the picture builds up while you talk: walk through it in order and say each label exactly as written ("First the request reaches the Load balancer."). Draw a new one when a doubt needs a different picture. Skip it for ideas with no parts, like a behavioural answer.',
     '3. Ask if they have any doubts. Answer each doubt simply. Use reference_answer for the deeper notes and candidate_background to link the answer to their own projects. If the notes do not cover something, say so; never invent facts.',
     '4. When they say they are ready (or have no more doubts), call start_recall, then ask them to explain the answer back in their own words, as they would in a real interview. Do not help while they explain.',
     '5. Then give honest, kind feedback in two or three sentences: what they got right, and the one or two things they missed or said unclearly. Offer one more try if they missed something important.',
@@ -217,10 +248,11 @@ export function learnInstruction(s: Session, round: Round, config: Config): stri
     '',
     'How to speak:',
     '- Like a kind teacher talking to a friend: warm, encouraging, smiling in your voice. Greet them by name, praise effort, and never sound strict, rushed or like an examiner.',
-    '- Speak slowly and clearly, one idea at a time. Short sentences, everyday words, no lists, no markdown, never read long text word for word.',
+    ...PACING_RULES,
+    '- Everyday words, no lists, no markdown, never read long text word for word.',
     '- When you use a technical term, explain it in plain words right away, with an everyday comparison if it helps.',
-    '- If they seem confused, or say they did not understand, do not repeat the same words: say it again more simply, with a small example. Ask "Is that clearer?"',
-    '- They can say "explain again", "slower", "example", "skip", "next" or "stop" at any time; follow it.',
+    '- If they seem confused, or say they did not understand, do not repeat the same words: say it again more simply, with a small example or a diagram. Ask "Is that clearer?"',
+    '- They can say "explain again", "slower", "example", "draw it", "skip", "next" or "stop" at any time; follow it ("draw it" means call show_diagram).',
     ...languageRules(config, 'lesson'),
     '- When next_question returns done, or time is nearly up, close warmly in one or two sentences, then call end_interview.',
   ];
@@ -243,7 +275,8 @@ export function debriefInstruction(s: Session, config: Config): string {
     `You are an interview coach on a voice call with ${config.candidate.name ?? 'the candidate'}. They just finished a mock interview, and a senior reviewer scored it. Your job is to talk them through that review so they do not have to read it.`,
     '',
     'How to speak:',
-    '- Simple words, short sentences, warm but honest, like a good mentor. No lists, no markdown, no reading out headings.',
+    '- Simple words, warm but honest, like a good mentor. No lists, no markdown, no reading out headings.',
+    ...PACING_RULES,
     ...languageRules(config, 'debrief'),
     '- Use only what is in the review below. Never invent scores, facts or examples.',
     '- They can interrupt any time. Follow what they say: "next", "repeat", "slower", "skip to the end", "why", or "stop".',

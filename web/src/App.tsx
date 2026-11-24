@@ -1,6 +1,8 @@
 import { Component, useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
 import { ApiError, beacon, del, get, post } from './api';
 import { Md } from './md';
+import { Diagram } from './diagram';
+import { DiagramPanel } from './diagram-panel';
 import { LiveInterview, type FunctionCall, type LiveState, type Turn as TurnState } from './live';
 import { Btn, Card, ConfirmButton, Empty, Section, SpeakerIcon, Stat, Tag, mmss, scoreTone, when } from './ui';
 
@@ -112,6 +114,7 @@ interface Session {
   };
   review?: Review;
   grading?: { startedAt: string };
+  reviewSkipped?: boolean;
   reviewError?: string;
 }
 
@@ -627,6 +630,8 @@ interface BankItem {
   lastScore: number | null;
   lastAsked: string | null;
   due: boolean;
+  /** `saved`: the file has a diagram; `none`: marked as not needing one; null: none yet. */
+  diagram: 'saved' | 'none' | null;
 }
 
 const BANK_FILTERS: { id: string; label: string; test: (q: BankItem) => boolean }[] = [
@@ -635,6 +640,7 @@ const BANK_FILTERS: { id: string; label: string; test: (q: BankItem) => boolean 
   { id: 'new', label: 'Never asked', test: (q) => !q.asked },
   { id: 'due', label: 'Due for repeat', test: (q) => q.due },
   { id: 'weak', label: 'Last score under 6', test: (q) => q.lastScore !== null && q.lastScore < 6 },
+  { id: 'nodiagram', label: 'No diagram yet', test: (q) => !q.diagram },
 ];
 
 /**
@@ -749,6 +755,7 @@ function QuestionBank({ opts, micOk, onStart, onBack }: { opts: Options; micOk: 
                             {q.priority === 3 && <Tag tone="dim">advanced</Tag>}
                             {!q.asked ? <Tag tone="dim">new</Tag> : q.lastScore !== null ? <Tag tone={scoreTone(q.lastScore)}>last {q.lastScore}/10</Tag> : <Tag tone="dim">asked {q.asked}×</Tag>}
                             {q.due && <Tag tone="warn">due</Tag>}
+                            {q.diagram === 'saved' && <Tag tone="dim">diagram</Tag>}
                             {q.lastAsked && <span className="dim">asked {when(q.lastAsked)}</span>}
                             <button type="button" className="linkish" onClick={() => toggleOpen(q.id)}>
                               {isOpen ? 'Hide answer' : 'Show answer'}
@@ -756,6 +763,7 @@ function QuestionBank({ opts, micOk, onStart, onBack }: { opts: Options; micOk: 
                           </div>
                           {isOpen && (
                             <div className="bank-answer">
+                              <DiagramPanel id={q.id} onSaved={(kind) => setItems((all) => all && all.map((x) => (x.id === q.id ? { ...x, diagram: kind } : x)))} />
                               <Md text={typeof n === 'string' ? n : q.short || 'No short answer in this file.'} />
                               {n === undefined && (
                                 <button type="button" className="linkish" onClick={() => loadNotes(q.id)}>
@@ -853,7 +861,14 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
   const [turns, setTurns] = useState<Turn[]>([]);
   const [calls, setCalls] = useState<ShownCall[]>([]);
   const [plan, setPlan] = useState(session.plan);
-  const [lesson, setLesson] = useState<{ id: string; question: string; notes: string; hidden: boolean; peek: boolean } | null>(null);
+  /**
+   * `diagram`: the tutor's latest show_diagram for this question (a new question clears it). It draws while
+   * the tutor speaks: `heard` is what the tutor said since it came up, in step with the voice (onSpoken), and
+   * each box shows when its name is said. `all`: everything shows (Show all, or the walk through stopped).
+   */
+  const [lesson, setLesson] = useState<{ id: string; question: string; notes: string; hidden: boolean; peek: boolean; quiz?: boolean; diagram?: { title: string; code: string; heard: string; all: boolean } } | null>(null);
+  /** Parts of the diagram showing now and at the start of the tutor's turn, and words the tutor said this turn. */
+  const drawn = useRef({ shown: 0, atTurnStart: 0, words: 0, active: false });
   const [notes, setNotes] = useState<{ question_id: string; rating: number; note: string }[]>([]);
   const [showNotes, setShowNotes] = useState(false);
   /** Tool calls, ratings and the connection log: hidden by default, so the call feels like a call. Remembered. */
@@ -904,7 +919,8 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
     });
   };
 
-  const finish = async (reason: string) => {
+  /** `skipReview`: "End without review": the call is saved but Claude does not grade it (Grade now stays on the next screen). */
+  const finish = async (reason: string, skipReview = false) => {
     if (finished.current) return;
     finished.current = true;
     setSaving(true);
@@ -912,7 +928,7 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
     addLog('ending', reason);
     await flushLog();
     try {
-      await post(`${base}/end`, { transcript: turnsRef.current, durationSeconds: Math.round(now()), reason });
+      await post(`${base}/end`, { transcript: turnsRef.current, durationSeconds: Math.round(now()), reason, ...(skipReview ? { skipReview: true } : {}) });
       onDone(session.id);
     } catch (e) {
       onError(e);
@@ -971,10 +987,19 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
             if (fc.name === 'record_note' && !rec.error) setNotes((n) => [...n, fc.args as { question_id: string; rating: number; note: string }]);
             if (fc.name === 'end_interview') endAsked.current = true;
             // Learn mode: the answer shows while the tutor teaches it, and hides when the explain-back starts.
-            const res = rec.result as { question?: string; question_id?: string; notes?: string; answer?: string } | undefined;
-            if (fc.name === 'next_question' && res?.question && (res.notes || res.answer))
-              setLesson({ id: res.question_id ?? '', question: res.question, notes: res.notes || res.answer || '', hidden: false, peek: false });
-            if (fc.name === 'start_recall' && !rec.error) setLesson((l) => (l ? { ...l, hidden: true, peek: false } : l));
+            const res = rec.result as { question?: string; question_id?: string; notes?: string; answer?: string; diagram?: { title?: string; mermaid?: string } } | undefined;
+            if (fc.name === 'next_question' && res?.question && (res.notes || res.answer)) {
+              // A saved diagram comes with the question and draws as the tutor names its boxes.
+              const saved = res.diagram?.mermaid ? { title: String(res.diagram.title ?? ''), code: res.diagram.mermaid, heard: '', all: false } : undefined;
+              drawn.current = { shown: 0, atTurnStart: 0, words: 0, active: !!saved };
+              setLesson({ id: res.question_id ?? '', question: res.question, notes: res.notes || res.answer || '', hidden: false, peek: false, ...(saved ? { diagram: saved } : {}) });
+            }
+            if (fc.name === 'start_recall' && !rec.error) setLesson((l) => (l ? { ...l, hidden: true, peek: false, quiz: false } : l));
+            if (fc.name === 'show_diagram' && !rec.error) {
+              const a = fc.args as { question_id?: string; title?: string; mermaid?: string };
+              drawn.current = { shown: 0, atTurnStart: 0, words: 0, active: true };
+              setLesson((l) => (l && (!a.question_id || a.question_id === l.id) ? { ...l, diagram: { title: String(a.title ?? ''), code: String(a.mermaid ?? ''), heard: '', all: false } } : l));
+            }
             return { result: rec.result };
           } catch (e) {
             const message = (e as Error).message;
@@ -997,6 +1022,20 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
       onToolCalls: runCalls,
       onTurnComplete: () => {
         if (endAsked.current) void live.current?.drained().then(() => finish('interviewer ended the interview'));
+        // Drawing while speaking: a whole turn of talk that named no new box means the walk through is over
+        // (or the names did not match): show the rest. Checked once the turn's audio has played out.
+        else if (drawn.current.active)
+          void live.current?.drained().then(() => {
+            const d = drawn.current;
+            if (d.words >= 8 && d.shown === d.atTurnStart) setLesson((l) => (l?.diagram && !l.diagram.all ? { ...l, diagram: { ...l.diagram, all: true } } : l));
+            d.atTurnStart = d.shown;
+            d.words = 0;
+          });
+      },
+      onSpoken: (text: string) => {
+        if (!drawn.current.active) return;
+        drawn.current.words += text.trim().split(/\s+/).filter(Boolean).length;
+        setLesson((l) => (l?.diagram ? { ...l, diagram: { ...l.diagram, heard: (l.diagram.heard + text).slice(-4000) } } : l));
       },
       onLevel: (rms: number) => {
         setLevel(rms);
@@ -1098,7 +1137,7 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
           </span>
         </div>
         <p className="callhint">
-          {learn ? 'Say “explain again”, “example”, “next” or “stop” any time.' : 'Say “hint”, “repeat” or “skip” any time.'}
+          {learn ? 'Say “explain again”, “example”, “draw it”, “next” or “stop” any time.' : 'Say “hint”, “repeat” or “skip” any time.'}
           {turnMode === 'button' ? ' Press Space when you finish answering.' : ''}
         </p>
         <div className="callbar">
@@ -1113,6 +1152,9 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
             {muted ? 'Unmute' : 'Mute'}
           </Btn>
           <span className="callbar-end">
+            <ConfirmButton kind="ghost" disabled={saving} confirmLabel="Press again: no review" onConfirm={() => finish('ended on the page without review', true)}>
+              End without review
+            </ConfirmButton>
             <ConfirmButton disabled={saving} confirmLabel="Press again to end" onConfirm={() => finish('ended on the page')}>
               {saving ? 'Saving…' : learn ? 'End lesson' : 'End interview'}
             </ConfirmButton>
@@ -1130,14 +1172,37 @@ function Live({ session, onError, onDone }: { session: Session; onError: (e: unk
             <Card tone={lesson.hidden ? 'warn' : 'accent'}>
               <b className="lesson-q">{lesson.question}</b>
               {lesson.hidden && !lesson.peek ? (
-                <p className="hint">
-                  Explain it back now, as you would in an interview.{' '}
-                  <button type="button" className="linkish" onClick={() => setLesson((l) => (l ? { ...l, peek: true } : l))}>
-                    Peek at the answer
-                  </button>
-                </p>
+                <>
+                  <p className="hint">
+                    Explain it back now, as you would in an interview.{' '}
+                    {lesson.diagram && !lesson.quiz && (
+                      <>
+                        <button type="button" className="linkish" onClick={() => setLesson((l) => (l ? { ...l, quiz: true } : l))}>
+                          Test me on the diagram
+                        </button>
+                        {' · '}
+                      </>
+                    )}
+                    <button type="button" className="linkish" onClick={() => setLesson((l) => (l ? { ...l, peek: true } : l))}>
+                      Peek at the answer
+                    </button>
+                  </p>
+                  {lesson.diagram && lesson.quiz && <Diagram key={`quiz-${lesson.diagram.code}`} code={lesson.diagram.code} title={lesson.diagram.title} quiz />}
+                </>
               ) : (
-                <Md text={lesson.notes} />
+                <>
+                  {lesson.diagram && (
+                    <Diagram
+                      key={lesson.diagram.code}
+                      code={lesson.diagram.code}
+                      title={lesson.diagram.title}
+                      reveal={{ heard: lesson.diagram.heard, all: lesson.diagram.all || lesson.hidden }}
+                      onProgress={(shown) => (drawn.current.shown = shown)}
+                      onShowAll={() => setLesson((l) => (l?.diagram ? { ...l, diagram: { ...l.diagram, all: true } } : l))}
+                    />
+                  )}
+                  <Md text={lesson.notes} />
+                </>
               )}
             </Card>
           ) : (
@@ -1451,7 +1516,7 @@ function Pending({ s, opts, onRetry }: { s: Session; opts: Options; onRetry: () 
     return (
       <Card tone="accent">
         <b>Not graded yet</b>
-        <p className="hint">Grading never started for this call.</p>
+        <p className="hint">{s.reviewSkipped ? 'You ended this call without a review. Grade it now if you want the scores and stronger answers.' : 'Grading never started for this call.'}</p>
         <Btn kind="green" onClick={onRetry}>
           Grade now
         </Btn>

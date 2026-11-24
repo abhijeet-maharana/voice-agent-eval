@@ -1,9 +1,10 @@
 import type { ReactNode } from 'react';
+import { Diagram } from './diagram';
 import { parse, type Block } from './md-parse';
 
 /**
  * Markdown for question notes: headings, paragraphs, bullet and numbered lists, block quotes, tables,
- * code blocks (kept unwrapped so text diagrams line up), rules, **bold**, *italic*, `code` and links.
+ * code blocks (kept unwrapped so text diagrams line up; ```mermaid blocks are drawn as diagrams), rules, **bold**, *italic*, `code` and links.
  * Everything becomes React nodes; no HTML from the file reaches the page, and only http(s) links are made.
  *
  * Notes are grouped into one <section> per "## " heading. The study sections the Q&A files use
@@ -66,6 +67,7 @@ function renderBlock(b: Block, key: string, label: string): ReactNode {
     case 'hr':
       return <hr key={key} />;
     case 'code':
+      if (b.lang === 'mermaid') return <Diagram key={key} code={b.text} />;
       return (
         <pre key={key} className="md-code" tabIndex={0}>
           {b.text}

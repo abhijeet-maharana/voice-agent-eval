@@ -29,6 +29,13 @@ export interface LiveHandlers {
   onLog(event: string, detail?: string): void;
   /** Button mode: the turn changed. */
   onTurn?(turn: Turn): void;
+  /**
+   * A piece of the interviewer's transcript at about the moment its audio plays. The transcript arrives
+   * ahead of the voice (audio comes faster than real time and waits in the player), so this is what syncs
+   * the screen to the voice, e.g. a diagram box appearing as its name is said. Never fires for speech that
+   * was cut off.
+   */
+  onSpoken?(text: string): void;
 }
 
 // Mic: resamples to 16 kHz Int16 and posts 100 ms chunks with their loudness.
@@ -98,6 +105,26 @@ export class LiveInterview {
   private micInfo = 'no mic track';
   private beats = 0;
   private seen = new Set<string>();
+  /** When (on the speaker's clock) the queued audio ends, and transcript pieces waiting for their audio to play. */
+  private queuedEnd = 0;
+  private spoken: { at: number; text: string }[] = [];
+  private spokenTimer?: ReturnType<typeof setInterval>;
+  /** Drops queued audio and the transcript pieces that went with it (they will never be heard). */
+  private flushPlayer() {
+    this.player?.port.postMessage('flush');
+    this.queuedEnd = this.outCtx?.currentTime ?? 0;
+    this.spoken = [];
+  }
+  /** Hands transcript pieces to onSpoken once the speaker clock reaches their audio (pausing freezes that clock). */
+  private queueSpoken(text: string) {
+    const ctx = this.outCtx;
+    if (!this.h?.onSpoken || !ctx) return;
+    this.spoken.push({ at: Math.max(ctx.currentTime, this.queuedEnd), text });
+    this.spokenTimer ??= setInterval(() => {
+      const now = this.outCtx?.currentTime ?? Infinity;
+      while (this.spoken.length && this.spoken[0].at <= now + 0.05) this.h?.onSpoken?.(this.spoken.shift()!.text);
+    }, 100);
+  }
   private log(event: string, detail?: string) {
     this.h?.onLog(event, detail);
   }
@@ -266,7 +293,10 @@ export class LiveInterview {
         this.once(`heard:${this.totalAudio}`, 'hearing you');
         this.h?.onTranscript('candidate', c.inputTranscription.text);
       }
-      if (c.outputTranscription?.text) this.h?.onTranscript('interviewer', c.outputTranscription.text);
+      if (c.outputTranscription?.text) {
+        this.h?.onTranscript('interviewer', c.outputTranscription.text);
+        this.queueSpoken(c.outputTranscription.text);
+      }
       // Live models can put audio and other parts in one event, and its docs show no mimeType on output
       // audio: play every inlineData part unless it is labelled as something other than audio.
       for (const part of c.modelTurn?.parts ?? []) {
@@ -276,13 +306,14 @@ export class LiveInterview {
           this.turnAudio++;
           this.totalAudio++;
           const pcm = fromBase64(part.inlineData.data);
+          if (this.outCtx) this.queuedEnd = Math.max(this.outCtx.currentTime, this.queuedEnd) + pcm.length / this.outCtx.sampleRate;
           this.player?.port.postMessage(pcm, [pcm.buffer]);
         } else if (part.inlineData) this.once(`mime:${mime}`, 'skipped part', mime);
         else if (part.text) this.once('textpart', 'text part', String(part.text).slice(0, 200));
       }
       if (c.interrupted) {
         this.log('interrupted', 'you talked over it, or noise did');
-        this.player?.port.postMessage('flush');
+        this.flushPlayer();
       }
       // Extended thinking speaks a filler ("one moment…") while a background tool runs and ends it with
       // turnComplete plus interactionStatus IN_PROGRESS: it is not done, so the candidate's turn must not
@@ -362,7 +393,7 @@ export class LiveInterview {
   /** Button mode: cut its voice off and take the turn. */
   interrupt(): void {
     if (this.turnMode !== 'button' || this.turnOpen) return;
-    this.player?.port.postMessage('flush');
+    this.flushPlayer();
     this.log('interrupted by you');
     this.openTurn();
   }
@@ -389,6 +420,7 @@ export class LiveInterview {
     if (this.closed) return;
     this.log('finished', reason ?? 'closed by the page');
     if (this.beat) clearInterval(this.beat);
+    if (this.spokenTimer) clearInterval(this.spokenTimer);
     this.closed = true;
     this.ready = false;
     if (this.ws) {

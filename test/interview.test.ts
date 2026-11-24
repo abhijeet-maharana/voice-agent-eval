@@ -393,7 +393,8 @@ test('learn mode: the tutor gets the answer, the page shows it, recall hides it,
   const { session, live } = await m.startSession({ round: 'tech', mode: 'learn' }, { now: new Date('2026-11-11T15:00:00Z'), fetchImpl: okFetch });
   assert.equal(session.mode, 'learn');
   const tools = (live.setup.setup as any).tools[0].functionDeclarations.map((t: { name: string }) => t.name);
-  assert.deepEqual(tools, ['next_question', 'reference_answer', 'candidate_background', 'job_context', 'start_recall', 'record_note', 'end_interview']);
+  assert.deepEqual(tools, ['next_question', 'reference_answer', 'candidate_background', 'job_context', 'show_diagram', 'start_recall', 'record_note', 'end_interview']);
+  assert.match(prompt(live), /call show_diagram first/);
   assert.match(prompt(live), /warm, patient, encouraging tutor/);
   assert.match(prompt(live), /call start_recall/);
   assert.match(live.kickoff, /Start the lesson/);
@@ -406,6 +407,12 @@ test('learn mode: the tutor gets the answer, the page shows it, recall hides it,
   assert.ok(!q.notes.startsWith('# '), 'without the title');
   assert.match(JSON.stringify(m.runTool(id, 'reference_answer', { question_id: q.question_id }).result), /notes/);
   assert.match(m.runTool(id, 'related_question', { topic: 'event loop' }).error!, /learn mode/);
+  // Diagrams: only for a question already asked, never empty or huge.
+  const flow = 'flowchart LR\n  A["Timers"] --> B["Poll"] --> C["Check"]';
+  assert.equal((m.runTool(id, 'show_diagram', { question_id: q.question_id, title: 'Loop phases', mermaid: flow }).result as any).shown, true);
+  assert.match(m.runTool(id, 'show_diagram', { question_id: session.plan[1]?.id ?? 'x', title: 't', mermaid: flow }).error!, /not a question you have asked/);
+  assert.match(m.runTool(id, 'show_diagram', { question_id: q.question_id, title: 't', mermaid: ' ' }).error!, /empty/);
+  assert.match(m.runTool(id, 'show_diagram', { question_id: q.question_id, title: 't', mermaid: 'x'.repeat(m.MAX_DIAGRAM + 1) }).error!, /too big/);
   assert.equal((m.runTool(id, 'start_recall', { question_id: q.question_id }).result as any).ok, true);
   const s = m.loadSession(id);
   assert.equal(s.plan[0].recalled, true);
@@ -447,6 +454,17 @@ test('learn mode: the tutor gets the answer, the page shows it, recall hides it,
   const plain = await m.startSession({ round: 'tech' }, { now: new Date('2026-11-11T15:05:00Z'), fetchImpl: okFetch });
   assert.equal(plain.session.mode, 'interview', 'interview by default');
   assert.match(m.runTool(plain.session.id, 'start_recall', { question_id: 'x' }).error!, /only for learn mode/);
+  assert.match(m.runTool(plain.session.id, 'show_diagram', { question_id: 'x', title: 't', mermaid: 'flowchart LR' }).error!, /only for learn mode/);
+
+  // End without review: saved, not gradable, and a review posted later clears the flag.
+  const skipped = await m.startSession({ round: 'tech' }, { now: new Date('2026-11-11T15:10:00Z'), fetchImpl: okFetch });
+  const ended = m.endSession(skipped.session.id, { transcript: [{ who: 'candidate', text: 'An answer.', start: 0, end: 5 }], durationSeconds: 30, skipReview: true });
+  assert.equal(ended.gradable, false);
+  assert.equal(ended.note, 'saved, review skipped');
+  assert.equal(m.loadSession(skipped.session.id).reviewSkipped, true);
+  const sq = skipped.session.plan[0];
+  m.saveReview(skipped.session.id, { answers: [{ question_id: sq.id, question: sq.question, score: 6 }] });
+  assert.equal(m.loadSession(skipped.session.id).reviewSkipped, undefined, 'grading it later clears the flag');
 });
 
 test('generic rounds: per round instructions reach the interviewer, review focus reaches the reviewer, defaultMode applies', async () => {
@@ -460,8 +478,9 @@ test('generic rounds: per round instructions reach the interviewer, review focus
   write('config.json', JSON.stringify({ candidate: { name: 'Sam', summary: 'a senior full stack engineer.' }, privateWords: ['Moonlight'], defaultMode: 'learn' }));
   const learned = await m.startSession({ round: 'screening' }, { now: new Date('2026-11-11T16:01:00Z'), fetchImpl: okFetch });
   assert.equal(learned.session.mode, 'learn');
-  assert.equal(learned.session.voice, 'Sulafat', 'learn mode gets the warm tutor voice by default');
+  assert.equal(learned.session.voice, 'Erinome', 'learn mode gets the clear tutor voice by default');
   assert.match(prompt(learned.live), /never sound strict/);
+  assert.match(prompt(learned.live), /about 140 words per minute/);
   assert.equal(m.pageOptions(NOW).defaultMode, 'learn');
   write('config.json', JSON.stringify({ candidate: { name: 'Sam', summary: 'a senior full stack engineer.' }, privateWords: ['Moonlight'], accent: 'Indian' }));
   const accented = await m.startSession({ round: 'screening' }, { now: new Date('2026-11-11T16:02:00Z'), fetchImpl: okFetch });

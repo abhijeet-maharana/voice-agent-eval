@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { CLOSER, DEFAULT_PRIORITY, MAX_ADDED, bankEntry, dayKey, loadBank, nextDue, pickQuestions, questionFile, readProgress, relatedQuestion, topicFolders, words } from './bank';
+import { MAX_DIAGRAM, type SavedDiagram, readDiagram, withoutDiagram } from './diagram-text';
 import { DEBRIEF_TOOLS, LEARN_TOOLS, TOOLS, VOICES, debriefInstruction, learnInstruction, liveConfig, liveModels, liveSetup, mintToken, pickTurnTaking, pickVoice, systemInstruction } from './interviewer';
 import type { BankQuestion, LiveModelId, Metrics, Mode, Progress, Review, ReviewAnswer, Round, Session, ToolCall, TranscriptTurn } from './types';
 import { HttpError, listPrepPacks, loadConfig, paths, profileTexts, readJson, readPrepPack, requireWorkspace, scrub, writeJson, writeText } from './workspace';
@@ -76,7 +77,7 @@ export interface StartInput {
   prepPack?: string;
   /** `fast` or `thinking`; default: the round's. */
   model?: string;
-  /** A VOICES name; default GEMINI_LIVE_VOICE (Kore), or GEMINI_LIVE_TUTOR_VOICE (Sulafat) in learn mode. */
+  /** A VOICES name; default GEMINI_LIVE_VOICE (Kore), or GEMINI_LIVE_TUTOR_VOICE (Erinome) in learn mode. */
   voice?: string;
   /** `interview` or `learn`; default: config.json defaultMode. */
   mode?: string;
@@ -193,9 +194,20 @@ export function searchBackground(query: string, prepPack?: string): string[] {
 export function lessonNotes(id: string): string {
   const file = questionFile(id);
   if (!file) return '';
-  const text = scrub(fs.readFileSync(file, 'utf8'));
+  // The saved diagram shows on its own (drawn as the tutor speaks), not inside the notes.
+  const text = withoutDiagram(scrub(fs.readFileSync(file, 'utf8')));
   return text.replace(/^[\s\S]*?^# .+$\n?/m, '').trim().slice(0, 6000);
 }
+
+/** A bank item's saved diagram, if it has one. */
+export function savedDiagram(id: string): SavedDiagram | undefined {
+  const file = questionFile(id);
+  const state = file ? readDiagram(scrub(fs.readFileSync(file, 'utf8'))) : null;
+  return state && 'diagram' in state ? state.diagram : undefined;
+}
+
+/** show_diagram: the most Mermaid code one diagram may hold (a small teaching diagram is a few hundred). */
+export { MAX_DIAGRAM };
 
 /** Runs one tool call from the live voice. `t`: seconds since the session started, on the page's clock. */
 export function runTool(id: string, name: string, args: Record<string, unknown>, now = new Date(), t?: number): ToolCall {
@@ -217,7 +229,16 @@ export function runTool(id: string, name: string, args: Record<string, unknown>,
         s.plan[i].asked = true;
         result = { done: false, number: i + 1, of: s.plan.length, question_id: s.plan[i].id, question: s.plan[i].question };
         // The lesson: the answer goes to the tutor and onto the candidate's screen.
-        if (learn) result = { ...(result as object), answer: bankEntry(s.plan[i].id)?.short || 'No answer on file.', notes: lessonNotes(s.plan[i].id) };
+        if (learn) {
+          // A saved diagram goes on screen with the answer and draws as the tutor names its boxes.
+          const diagram = savedDiagram(s.plan[i].id);
+          result = {
+            ...(result as object),
+            answer: bankEntry(s.plan[i].id)?.short || 'No answer on file.',
+            notes: lessonNotes(s.plan[i].id),
+            ...(diagram ? { diagram: { ...diagram, note: 'This diagram is on their screen now, drawing each box as you say its label. Walk through it in order, saying each label exactly as written.' } } : {}),
+          };
+        }
         break;
       }
       case 'reference_answer': {
@@ -226,6 +247,16 @@ export function runTool(id: string, name: string, args: Record<string, unknown>,
         result = learn
           ? { question: q.question, notes: lessonNotes(q.id) || 'No notes on file.' }
           : { question: q.question, strong_answer_covers: bankEntry(q.id)?.short || 'No reference answer on file.' };
+        break;
+      }
+      case 'show_diagram': {
+        if (!learn) throw new Error('show_diagram is only for learn mode');
+        const q = planned(args.question_id);
+        if (!q || !q.asked) throw new Error('question_id is not a question you have asked');
+        const code = String(args.mermaid ?? '').trim();
+        if (!code) throw new Error('mermaid is empty: send Mermaid code, e.g. flowchart LR then A["Client"] --> B["Server"]');
+        if (code.length > MAX_DIAGRAM) throw new Error(`Diagram too big (${code.length} characters, at most ${MAX_DIAGRAM}). Draw fewer boxes.`);
+        result = { shown: true, message: 'The diagram is on their screen now. Walk them through it box by box, naming each box.' };
         break;
       }
       case 'start_recall': {
@@ -363,8 +394,11 @@ function cleanTranscript(raw: unknown): TranscriptTurn[] {
   });
 }
 
-/** Saves the transcript once. Returns whether there is anything to grade. */
-export function endSession(id: string, body: { transcript?: unknown; durationSeconds?: unknown; reason?: unknown }, now = new Date()) {
+/**
+ * Saves the transcript once. Returns whether there is anything to grade. `skipReview`: the candidate pressed
+ * "End without review", so grading does not start (the page still offers Grade now later).
+ */
+export function endSession(id: string, body: { transcript?: unknown; durationSeconds?: unknown; reason?: unknown; skipReview?: unknown }, now = new Date()) {
   const s = loadSession(id);
   if (s.status !== 'live') return { session: s, gradable: false, note: 'already ended' };
   s.transcript = cleanTranscript(body.transcript);
@@ -373,9 +407,11 @@ export function endSession(id: string, body: { transcript?: unknown; durationSec
   s.endReason = s.endReason || String(body.reason ?? 'ended on the page').slice(0, 200);
   s.metrics = measure(s.transcript);
   s.status = 'ended';
+  if (body.skipReview === true) s.reviewSkipped = true;
   saveSession(s);
-  const gradable = s.transcript.some((t) => t.who === 'candidate');
-  return { session: s, gradable, note: gradable ? 'saved' : 'no answers in the transcript, nothing to grade' };
+  const answered = s.transcript.some((t) => t.who === 'candidate');
+  const note = !answered ? 'no answers in the transcript, nothing to grade' : s.reviewSkipped ? 'saved, review skipped' : 'saved';
+  return { session: s, gradable: answered && !s.reviewSkipped, note };
 }
 
 // ---------- Review ----------
@@ -415,6 +451,7 @@ export function saveReview(id: string, body: any, now = new Date(), reviewer = '
   s.status = 'reviewed';
   delete s.grading;
   delete s.reviewError;
+  delete s.reviewSkipped;
   saveSession(s);
   // Progress counts each session once, so a re-posted review does not double the history.
   if (first) {
@@ -615,6 +652,7 @@ export function questionList(now = new Date()) {
       lastScore: p?.scores.at(-1) ?? null,
       lastAsked: p?.lastAsked ?? null,
       due: !!p && p.nextDue <= today,
+      diagram: q.diagram ?? null,
     };
   });
 }
